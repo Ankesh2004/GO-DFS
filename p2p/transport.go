@@ -6,7 +6,7 @@ import "net"
 type Peer interface {
 	net.Conn
 	Send([]byte) error
-	CloseStream()
+	CloseStream() error
 }
 
 // High level transport interface : will be used further for TCP , QUIC etc
