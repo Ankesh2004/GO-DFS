@@ -47,6 +47,8 @@ func (p *TCPPeer) Send(data []byte) error {
 type TCPTransportOptions struct {
 	ListenPort string
 	OnPeer     (func(Peer))
+	Decoder    Decoder
+	Handshake  Handshake
 }
 
 // ============= TCP Transport =================
@@ -56,9 +58,9 @@ type TCPTransport struct {
 	rpcChannel chan RPC
 }
 
-func NewTCPTransport(options *TCPTransportOptions) *TCPTransport {
+func NewTCPTransport(options TCPTransportOptions) *TCPTransport {
 	t := &TCPTransport{
-		TCPTransportOptions: *options,
+		TCPTransportOptions: options,
 		Listener:            nil, // will be added latr
 		rpcChannel:          make(chan RPC, 1024),
 	}
@@ -75,6 +77,7 @@ func (t *TCPTransport) ListenAndAccept() error {
 		return err
 	}
 	t.Listener = conn
+
 	go t.acceptLoop() // run multiple accept loops so that if one is busy then other can accept new connections
 	fmt.Println("Listening on port ", t.ListenPort)
 	return nil
@@ -93,6 +96,7 @@ func (t *TCPTransport) Dial(addr string) error {
 }
 
 func (t *TCPTransport) acceptLoop() {
+	fmt.Println("Starting accept loop")
 	for {
 		conn, err := t.Listener.Accept()
 		if err != nil {
@@ -105,19 +109,21 @@ func (t *TCPTransport) acceptLoop() {
 }
 
 func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
-	defer func() {
-		conn.Close()
-		fmt.Println("Connection closed")
-	}()
+	// defer func() {
+	// 	conn.Close()
+	// 	fmt.Println("Connection closed")
+	// }()
 	peer, err := NewTCPPeer(isOutbound, conn)
 	if err != nil {
 		log.Fatal("Failed to create peer")
 		return
 	}
-	if !t.Handshake(peer) {
+	if t.Handshake(peer) != nil {
 		log.Fatal("Failed to handshake")
 		return
 	}
+	fmt.Println("New connection....", peer)
+
 	// Tell server to add peer in its list
 	// if t.OnPeer != nil {
 	// 	if err := t.OnPeer(peer); err != nil {
@@ -126,12 +132,13 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 	// }
 
 	//now accept rpcs ---> decode ---> send to rpc channel
+	// read loop
+	rpc := &RPC{}
 	for {
-
+		if err := t.Decoder.Decode(conn, rpc); err != nil {
+			fmt.Println("failed to decodeeee")
+			continue
+		}
+		fmt.Println(string(rpc.Payload))
 	}
-}
-
-// TODO:
-func (opt *TCPTransport) Decoder() error {
-	return nil
 }

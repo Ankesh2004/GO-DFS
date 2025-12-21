@@ -1,4 +1,4 @@
-package godfs
+package main
 
 import (
 	"crypto/sha256"

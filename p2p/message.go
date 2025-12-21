@@ -5,7 +5,7 @@ const IncomingStream = 0x2
 
 // Holds data of any msg sent between any 2 clietns
 type RPC struct {
-	From     string
-	Payload  []byte
+	From     string // Who is sending the message?
+	Payload  []byte //data
 	isStream bool
 }

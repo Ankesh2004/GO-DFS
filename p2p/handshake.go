@@ -1,10 +1,11 @@
 package p2p
 
-import "net"
-
 // TODO:
 // run just after establishing connection
 // TODO: handle credentials verification here
-func (opt *TCPTransportOptions) Handshake(conn net.Conn) bool {
-	return true
+type Handshake func(peer Peer) error
+
+// sample does no operation - just passes the request
+func SampleHandshake(peer Peer) error {
+	return nil
 }

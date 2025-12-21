@@ -3,8 +3,9 @@ package p2p
 import "net"
 
 // Peer := remote node
+// Peer is basically a "connection" to remote node
 type Peer interface {
-	net.Conn
+	net.Conn // COMPOSITION : can hold net.TCPConn, net.QUICConn etc
 	Send([]byte) error
 	CloseStream() error
 }
