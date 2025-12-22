@@ -23,9 +23,9 @@ type Store struct {
 	rootDir string
 }
 
-func NewStore() *Store {
+func NewStore(rootDir string) *Store {
 	return &Store{
-		rootDir: "./cas",
+		rootDir: rootDir,
 	}
 }
 
@@ -49,6 +49,7 @@ func (s *Store) WriteStream(key string, r io.Reader) error {
 	if err := os.MkdirAll(cas.path, 0755); err != nil {
 		return err
 	}
+	fmt.Println(cas.FullPath())
 	file, err := os.Create(cas.FullPath())
 	if err != nil {
 		return err
@@ -78,13 +79,15 @@ func (s *Store) ReadStream(key string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Written bytes: ", n)
+	fmt.Println("Read bytes: ", n)
 	fmt.Println(buff.String())
 	return nil
 }
 
 func (s *Store) DeleteStream(key string) error {
 	fullPath := s.getCASPath(key).FullPath()
+	// TODO: remove all empty directories
+	// Deleting the first path is not good ???, it may delete other BRANCHES of different files
 	return os.Remove(fullPath)
 }
 
@@ -105,5 +108,5 @@ func (s *Store) Wipe() error {
 }
 
 func (p Path) FullPath() string {
-	return p.path + p.filename
+	return p.path + "/" + p.filename
 }

@@ -12,7 +12,7 @@ type Peer interface {
 
 // High level transport interface : will be used further for TCP , QUIC etc
 type Transport interface {
-	PeerAddr() string
+	Addr() string
 	Dial(addr string) error
 	ListenAndAccept() error
 	Consume() <-chan RPC
