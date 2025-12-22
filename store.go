@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 )
@@ -23,17 +25,20 @@ type Store struct {
 
 func NewStore() *Store {
 	return &Store{
-		rootDir: "./dfs",
+		rootDir: "./cas",
 	}
 }
 
 func (s *Store) getCASPath(key string) Path {
 	hash256 := sha256.Sum256([]byte(key))
 	hash := hex.EncodeToString(hash256[:])
-	casPath := s.rootDir + "/cas/" + hash[0:8] + "/" + hash[8:16] + "/" + hash[16:24] + "/" + hash[24:32]
+
+	// MAKE IT BETTER WITH LOOPS
+	// TODO : ALSO WHAT WOULD BE AN OPTIMAL NUMBER OF DIRECTORIES ?? TEST SOME METRIC  ON DIFFERENT NUMBER OF NESTINGS
+	casPath := s.rootDir + "/" + hash[0:8] + "/" + hash[8:16] + "/" + hash[16:24] + "/" + hash[24:32]
 	cas := Path{
 		path:     casPath,
-		filename: key,
+		filename: hash, // filename is hash, so we can retrieve it later
 	}
 	return cas
 }
@@ -44,7 +49,7 @@ func (s *Store) WriteStream(key string, r io.Reader) error {
 	if err := os.MkdirAll(cas.path, 0755); err != nil {
 		return err
 	}
-	file, err := os.Create(cas.path + "/" + cas.filename)
+	file, err := os.Create(cas.FullPath())
 	if err != nil {
 		return err
 	}
@@ -55,28 +60,37 @@ func (s *Store) WriteStream(key string, r io.Reader) error {
 	return nil
 }
 
-func (s *Store) ReadStream(key string) (int64, io.ReadCloser, error) {
-	casPath := s.getCASPath(key).path
-	file, err := os.Open(casPath)
+func (s *Store) ReadStream(key string) error {
+	//1. open the file
+	fullPath := s.getCASPath(key).FullPath()
+	file, err := os.Open(fullPath)
+
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
-	info, err := file.Stat()
+	defer file.Close()
+	// info, err := file.Stat()
+	// if err != nil {
+	// 	return 0, nil, err
+	// }
+	buff := new(bytes.Buffer)
+	n, err := io.Copy(buff, file)
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
-	var r io.ReadCloser = file
-	return info.Size(), r, nil
+	fmt.Println("Written bytes: ", n)
+	fmt.Println(buff.String())
+	return nil
 }
 
 func (s *Store) DeleteStream(key string) error {
-	casPath := s.getCASPath(key).path
-	return os.Remove(casPath)
+	fullPath := s.getCASPath(key).FullPath()
+	return os.Remove(fullPath)
 }
 
 func (s *Store) HasStream(key string) (bool, error) {
-	casPath := s.getCASPath(key).path
-	_, err := os.Stat(casPath)
+	fullPath := s.getCASPath(key).FullPath()
+	_, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -88,4 +102,8 @@ func (s *Store) HasStream(key string) (bool, error) {
 
 func (s *Store) Wipe() error {
 	return os.RemoveAll(s.rootDir)
+}
+
+func (p Path) FullPath() string {
+	return p.path + p.filename
 }

@@ -46,7 +46,7 @@ func (p *TCPPeer) Send(data []byte) error {
 // ============ TCP Transport options (configurations required to create a transport) ============
 type TCPTransportOptions struct {
 	ListenPort string
-	OnPeer     (func(Peer))
+	OnPeer     func(Peer) error
 	Decoder    Decoder
 	Handshake  Handshake
 }
@@ -66,6 +66,8 @@ func NewTCPTransport(options TCPTransportOptions) *TCPTransport {
 	}
 	return t
 }
+
+// consume return read-only channel to receive from another peer
 func (t *TCPTransport) Consume() <-chan RPC {
 	return t.rpcChannel
 }
@@ -109,10 +111,10 @@ func (t *TCPTransport) acceptLoop() {
 }
 
 func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
-	// defer func() {
-	// 	conn.Close()
-	// 	fmt.Println("Connection closed")
-	// }()
+	defer func() {
+		conn.Close()
+		fmt.Println("Connection closed")
+	}()
 	peer, err := NewTCPPeer(isOutbound, conn)
 	if err != nil {
 		log.Fatal("Failed to create peer")
@@ -125,20 +127,26 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 	fmt.Println("New connection....", peer)
 
 	// Tell server to add peer in its list
-	// if t.OnPeer != nil {
-	// 	if err := t.OnPeer(peer); err != nil {
-	// 		return
-	// 	}
-	// }
+	if t.OnPeer != nil {
+		if err := t.OnPeer(peer); err != nil {
+			return
+		}
+	}
 
 	//now accept rpcs ---> decode ---> send to rpc channel
 	// read loop
-	rpc := &RPC{}
+	rpc := RPC{}
 	for {
-		if err := t.Decoder.Decode(conn, rpc); err != nil {
+		// This error can be due to 2 reasons:
+		// 1. payload was not correct ---> continue
+		// 2. the connection is dropped ---> here if we continue then we will go into read loop forever, wasting server's compute for a dead connection
+		// ---> here we have to break the loop somehow  TODO
+		if err := t.Decoder.Decode(conn, &rpc); err != nil {
 			fmt.Println("failed to decodeeee")
 			continue
 		}
-		fmt.Println(string(rpc.Payload))
+		rpc.From = conn.RemoteAddr().String()
+		t.rpcChannel <- rpc // dump the data from this channel into (this)transport's channel
+		// fmt.Println(string(rpc.Payload))
 	}
 }
