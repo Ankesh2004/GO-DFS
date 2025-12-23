@@ -43,6 +43,9 @@ func (p *TCPPeer) Send(data []byte) error {
 	}
 	return nil
 }
+func (p *TCPPeer) RemoteAddr() net.Addr {
+	return p.Conn.RemoteAddr()
+}
 
 // ============ TCP Transport options (configurations required to create a transport) ============
 type TCPTransportOptions struct {
@@ -103,7 +106,7 @@ func (t *TCPTransport) ListenAndAccept() error {
 func (t *TCPTransport) Dial(addr string) error {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		log.Fatal("Failed to dial up")
+		log.Fatal("Failed to dial up: ", addr)
 		return err
 	}
 	go t.handleConnection(conn, true)

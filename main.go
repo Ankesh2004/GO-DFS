@@ -10,21 +10,29 @@ func OnPeerTest(peer p2p.Peer) error {
 	fmt.Println("works")
 	return nil
 }
-func main() {
-	fmt.Println("This is GO-DFS")
 
+func createServer(addr string, nodes ...string) *FileServer {
 	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
-		ListenPort: "0.0.0.0:3000",
+		ListenPort: addr,
 		Handshake:  p2p.SampleHandshake,
 		Decoder:    p2p.SampleDecoder{},
-		OnPeer:     OnPeerTest,
+		// OnPeer:     OnPeerTest,
 	})
 	options := FileServerOptions{
-		rootDir:   "./cas",
-		Transport: transport,
+		rootDir:         "./cas",
+		Transport:       transport,
+		BooststrapNodes: nodes,
 	}
 	server := NewFileServer(options)
-	server.Start()
+	transport.OnPeer = server.OnPeer
+	return server
+}
+func main() {
+	fmt.Println("This is GO-DFS")
+	s1 := createServer("0.0.0.0:3000")
+	s2 := createServer("0.0.0.0:3001", "0.0.0.0:3000")
+	go s1.Start()
+	go s2.Start()
 	select {}
 
 }
