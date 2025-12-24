@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"time"
 
 	"github.com/Ankesh2004/GO-DFS/p2p"
 )
@@ -15,7 +17,7 @@ func createServer(addr string, nodes ...string) *FileServer {
 	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
 		ListenPort: addr,
 		Handshake:  p2p.SampleHandshake,
-		Decoder:    p2p.SampleDecoder{},
+		Decoder:    p2p.GOBDecoder{},
 		// OnPeer:     OnPeerTest,
 	})
 	options := FileServerOptions{
@@ -31,8 +33,25 @@ func main() {
 	fmt.Println("This is GO-DFS")
 	s1 := createServer("0.0.0.0:3000")
 	s2 := createServer("0.0.0.0:3001", "0.0.0.0:3000")
-	go s1.Start()
-	go s2.Start()
-	select {}
 
+	go func() {
+		if err := s1.Start(); err != nil {
+			fmt.Println("s1 Start error:", err)
+		}
+	}()
+	time.Sleep(1 * time.Second) // Wait for s1 to start listening
+
+	go func() {
+		if err := s2.Start(); err != nil {
+			fmt.Println("s2 Start error:", err)
+		}
+	}()
+	time.Sleep(2 * time.Second) // Wait for s2 to connect to s1
+
+	fmt.Printf("s2 has %d peers\n", len(s2.GetPeers()))
+	if err := s2.StoreData("Long_data111", bytes.NewReader([]byte("long_data_file111"))); err != nil {
+		fmt.Println("StoreData error:", err)
+	}
+
+	select {}
 }
