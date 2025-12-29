@@ -30,7 +30,8 @@ func NewTCPPeer(isOutbound bool, conn net.Conn) (Peer, error) {
 
 func (p *TCPPeer) CloseStream() error {
 	p.Wg.Done()
-	return p.Conn.Close()
+	// return p.Conn.Close()
+	return nil
 }
 
 func (p *TCPPeer) Send(data []byte) error {
@@ -162,8 +163,12 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 		// 2. the connection is dropped ---> here if we continue then we will go into read loop forever, wasting server's compute for a dead connection
 		// ---> here we have to break the loop somehow  TODO
 		if err := t.Decoder.Decode(conn, &rpc); err != nil {
-			fmt.Println("failed to decodeeee")
-			continue
+			if errors.Is(err, io.EOF) {
+				// Connection closed gracefully by the other side
+				break
+			}
+			fmt.Println("failed to decodeeee", err)
+			break
 		}
 		rpc.From = conn.RemoteAddr().String()
 		if rpc.isStream {

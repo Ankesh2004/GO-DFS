@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -62,27 +61,21 @@ func (s *Store) WriteStream(key string, r io.Reader) (int64, error) {
 	return n, nil
 }
 
-func (s *Store) ReadStream(key string) (io.Reader, error) {
-	//1. open the file
+func (s *Store) ReadStream(key string) (int64, io.ReadCloser, error) {
 	fullPath := s.getCASPath(key).FullPath()
 	file, err := os.Open(fullPath)
+	if err != nil {
+		return 0, nil, err
+	}
 
+	fi, err := file.Stat()
 	if err != nil {
-		return nil, err
+		file.Close()
+		return 0, nil, err
 	}
-	defer file.Close()
-	// info, err := file.Stat()
-	// if err != nil {
-	// 	return 0, nil, err
-	// }
-	buff := new(bytes.Buffer)
-	n, err := io.Copy(buff, file)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Println("Read bytes: ", n)
-	fmt.Println(buff.String())
-	return buff, nil
+	// NOTE: WE ARE NOT CLOSING THE file (WHICH ACTS AS READER) HERE,
+	// HENCE, WE NEED TO CLOSE IT WHEREVER WE CALL ReadStream() function
+	return fi.Size(), file, nil
 }
 
 func (s *Store) DeleteStream(key string) error {

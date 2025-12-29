@@ -23,10 +23,12 @@ func TestRead(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	if err := s.ReadStream("testdata2"); err != nil {
+	_, r, err := s.ReadStream("testdata2")
+	if err != nil {
 		t.Error(err)
 		return
 	}
+	defer r.Close()
 }
 
 func TestDelete(t *testing.T) {
