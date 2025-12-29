@@ -23,6 +23,18 @@ type SampleDecoder struct {
 }
 
 func (d SampleDecoder) Decode(r io.Reader, rpc *RPC) error {
+	peekBuf := make([]byte, 1)
+	if _, err := r.Read(peekBuf); err != nil {
+		return err
+	}
+
+	stream := peekBuf[0] == IncomingStream
+	if stream {
+		rpc.isStream = true
+		fmt.Println("IT IS A STREAM")
+		return nil
+	}
+
 	buffer := make([]byte, 1024)
 	n, err := r.Read(buffer)
 

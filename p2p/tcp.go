@@ -15,21 +15,21 @@ type TCPPeer struct {
 	// isOutbound := true if we are the one who dialed the connection
 	// isOutbound := false if we are the one who accepted the connection
 	isOutbound bool
-	wg         *sync.WaitGroup
+	Wg         *sync.WaitGroup
 }
 
 func NewTCPPeer(isOutbound bool, conn net.Conn) (Peer, error) {
 	p := &TCPPeer{
 		isOutbound: isOutbound,
 		Conn:       conn,
-		wg:         &sync.WaitGroup{},
+		Wg:         &sync.WaitGroup{},
 	}
-	p.wg.Add(1)
+	// p.wg.Add(1)
 	return p, nil
 }
 
 func (p *TCPPeer) CloseStream() error {
-	p.wg.Done()
+	p.Wg.Done()
 	return p.Conn.Close()
 }
 
@@ -155,8 +155,8 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 
 	//now accept rpcs ---> decode ---> send to rpc channel
 	// read loop
-	rpc := RPC{}
 	for {
+		rpc := RPC{}
 		// This error can be due to 2 reasons:
 		// 1. payload was not correct ---> continue
 		// 2. the connection is dropped ---> here if we continue then we will go into read loop forever, wasting server's compute for a dead connection
@@ -166,6 +166,14 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 			continue
 		}
 		rpc.From = conn.RemoteAddr().String()
+		if rpc.isStream {
+			peer.(*TCPPeer).Wg.Add(1)
+			fmt.Println("Waiting till stream finishes...")
+			peer.(*TCPPeer).Wg.Wait()
+			fmt.Println("Stream done")
+			continue
+		}
+
 		t.rpcChannel <- rpc // dump the data from this channel into (this)transport's channel
 		// fmt.Println(string(rpc.Payload))
 	}

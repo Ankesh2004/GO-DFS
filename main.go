@@ -17,11 +17,11 @@ func createServer(addr string, nodes ...string) *FileServer {
 	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
 		ListenPort: addr,
 		Handshake:  p2p.SampleHandshake,
-		Decoder:    p2p.GOBDecoder{},
+		Decoder:    p2p.SampleDecoder{},
 		// OnPeer:     OnPeerTest,
 	})
 	options := FileServerOptions{
-		rootDir:         "./cas",
+		rootDir:         "./cas" + addr[8:12],
 		Transport:       transport,
 		BooststrapNodes: nodes,
 	}
@@ -49,9 +49,17 @@ func main() {
 	time.Sleep(2 * time.Second) // Wait for s2 to connect to s1
 
 	fmt.Printf("s2 has %d peers\n", len(s2.GetPeers()))
-	if err := s2.StoreData("Long_data111", bytes.NewReader([]byte("long_data_file111"))); err != nil {
-		fmt.Println("StoreData error:", err)
+	for i := 0; i < 10; i++ {
+		if err := s2.StoreData(fmt.Sprintf("mydatakey%d", i), bytes.NewReader([]byte("long_data_file111"))); err != nil {
+			fmt.Println("StoreData error:", err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	// if data, err := s2.GetFile("mydatakey"); err != nil {
+	// 	fmt.Println("GetFile error:", err)
+	// } else {
+	// 	fmt.Println("Data:", data)
+	// }
 
 	select {}
 }

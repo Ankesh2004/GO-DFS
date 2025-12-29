@@ -9,7 +9,7 @@ import (
 func TestStore(t *testing.T) {
 	s := NewStore("./cas")
 	data := bytes.NewReader([]byte("Hello"))
-	if err := s.WriteStream("testdata2", data); err != nil {
+	if _, err := s.WriteStream("testdata2", data); err != nil {
 		t.Error(err)
 		return
 	}
@@ -19,7 +19,7 @@ func TestStore(t *testing.T) {
 func TestRead(t *testing.T) {
 	s := NewStore("./cas")
 	data := bytes.NewReader([]byte("Hello"))
-	if err := s.WriteStream("testdata2", data); err != nil {
+	if _, err := s.WriteStream("testdata2", data); err != nil {
 		t.Error(err)
 		return
 	}
@@ -32,7 +32,7 @@ func TestRead(t *testing.T) {
 func TestDelete(t *testing.T) {
 	s := NewStore("./cas")
 	data := bytes.NewReader([]byte("Hello my boi"))
-	if err := s.WriteStream("testdata3", data); err != nil {
+	if _, err := s.WriteStream("testdata3", data); err != nil {
 		t.Error(err)
 		return
 	}

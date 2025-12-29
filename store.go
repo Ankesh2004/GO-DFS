@@ -44,30 +44,31 @@ func (s *Store) getCASPath(key string) Path {
 }
 
 // We are reading and writing using streams because buffer is not optimal as it needs to store entire object in RAM first.
-func (s *Store) WriteStream(key string, r io.Reader) error {
+func (s *Store) WriteStream(key string, r io.Reader) (int64, error) {
 	cas := s.getCASPath(key)
 	if err := os.MkdirAll(cas.path, 0755); err != nil {
-		return err
+		return 0, err
 	}
 	fmt.Println(cas.FullPath())
 	file, err := os.Create(cas.FullPath())
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer file.Close()
-	if _, err := io.Copy(file, r); err != nil {
-		return err
+	n, err := io.Copy(file, r)
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	return n, nil
 }
 
-func (s *Store) ReadStream(key string) error {
+func (s *Store) ReadStream(key string) (io.Reader, error) {
 	//1. open the file
 	fullPath := s.getCASPath(key).FullPath()
 	file, err := os.Open(fullPath)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer file.Close()
 	// info, err := file.Stat()
@@ -77,11 +78,11 @@ func (s *Store) ReadStream(key string) error {
 	buff := new(bytes.Buffer)
 	n, err := io.Copy(buff, file)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	fmt.Println("Read bytes: ", n)
 	fmt.Println(buff.String())
-	return nil
+	return buff, nil
 }
 
 func (s *Store) DeleteStream(key string) error {
@@ -91,16 +92,16 @@ func (s *Store) DeleteStream(key string) error {
 	return os.Remove(fullPath)
 }
 
-func (s *Store) HasStream(key string) (bool, error) {
+func (s *Store) Has(key string) bool {
 	fullPath := s.getCASPath(key).FullPath()
 	_, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return false
 		}
-		return false, err
+		return false
 	}
-	return true, nil
+	return true
 }
 
 func (s *Store) Wipe() error {
