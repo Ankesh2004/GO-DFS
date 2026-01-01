@@ -60,6 +60,23 @@ func (s *Store) WriteStream(key string, r io.Reader) (int64, error) {
 	}
 	return n, nil
 }
+func (s *Store) WriteStreamEncrypted(encKey []byte, encNonce []byte, key string, r io.Reader) (int64, error) {
+	cas := s.getCASPath(key)
+	if err := os.MkdirAll(cas.path, 0755); err != nil {
+		return 0, err
+	}
+	fmt.Println(cas.FullPath())
+	file, err := os.Create(cas.FullPath())
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	n, err := encrypt(encKey, encNonce, r, file)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
 
 func (s *Store) ReadStream(key string) (int64, io.ReadCloser, error) {
 	fullPath := s.getCASPath(key).FullPath()
@@ -76,6 +93,31 @@ func (s *Store) ReadStream(key string) (int64, io.ReadCloser, error) {
 	// NOTE: WE ARE NOT CLOSING THE file (WHICH ACTS AS READER) HERE,
 	// HENCE, WE NEED TO CLOSE IT WHEREVER WE CALL ReadStream() function
 	return fi.Size(), file, nil
+}
+
+func (s *Store) ReadStreamDecyrpted(encKey []byte, encNonce []byte, key string) (int64, io.ReadCloser, error) {
+	fullPath := s.getCASPath(key).FullPath()
+	file, err := os.Open(fullPath)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	fi, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return 0, nil, err
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		_, err := decrypt(encKey, encNonce, file, pw)
+		if err != nil {
+			fmt.Println("Failed to decrypt", err)
+		}
+	}()
+	// NOTE: WE ARE NOT CLOSING THE file (WHICH ACTS AS READER) HERE,
+	// HENCE, WE NEED TO CLOSE IT WHEREVER WE CALL ReadStream() function
+	return fi.Size(), pr, nil
 }
 
 func (s *Store) DeleteStream(key string) error {

@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/p2p"
@@ -49,7 +49,7 @@ func main() {
 	time.Sleep(2 * time.Second) // Wait for s2 to connect to s1
 
 	fmt.Printf("[%s] s2 has %d peers\n", s2.Transport.Addr(), len(s2.GetPeers()))
-	// s2.StoreData("mydatakey", bytes.NewReader([]byte("long_data_file111")))
+	s2.StoreData("mydatakey", bytes.NewReader([]byte("long_data_file111")))
 	// for i := 0; i < 10; i++ {
 	// 	if err := s2.StoreData(fmt.Sprintf("mydatakey%d", i), bytes.NewReader([]byte("long_data_file111"))); err != nil {
 	// 		fmt.Println("StoreData error:", err)
@@ -57,13 +57,13 @@ func main() {
 	// 	time.Sleep(5 * time.Millisecond)
 	// }
 
-	if r, err := s1.GetFile("mydatakey"); err != nil {
-		fmt.Println("GetFile error:", err)
-	} else {
-		b, _ := io.ReadAll(r)
-		fmt.Println("Data:", string(b))
-		r.(io.ReadCloser).Close()
-	}
+	// if r, err := s1.GetFile("mydatakey"); err != nil {
+	// 	fmt.Println("GetFile error:", err)
+	// } else {
+	// 	b, _ := io.ReadAll(r)
+	// 	fmt.Println("Data:", string(b))
+	// 	r.(io.ReadCloser).Close()
+	// }
 
 	select {}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/p2p"
+	"golang.org/x/crypto/chacha20"
 )
 
 type Payload struct {
@@ -32,17 +34,34 @@ type FileServer struct {
 
 	peers     map[string]p2p.Peer
 	peersLock sync.Mutex
+
+	// for encryption
+	key   []byte
+	nonce []byte
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
 	store := NewStore(
 		options.rootDir,
 	)
+
+	// Generate cryptographically secure random key and nonce
+	key := make([]byte, chacha20.KeySize)
+	nonce := make([]byte, chacha20.NonceSize)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("failed to generate encryption key: %v", err))
+	}
+	if _, err := rand.Read(nonce); err != nil {
+		panic(fmt.Sprintf("failed to generate nonce: %v", err))
+	}
+
 	return &FileServer{
 		FileServerOptions: options,
 		s:                 store,
 		quitChannel:       make(chan struct{}),
 		peers:             make(map[string]p2p.Peer),
+		key:               key,
+		nonce:             nonce,
 	}
 }
 
