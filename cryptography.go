@@ -42,7 +42,6 @@ func copyStream(stream cipher.Stream, src io.Reader, dst io.Writer) (int64, erro
 			if writeErr != nil {
 				return wb, fmt.Errorf("failed to write to stream: %w", writeErr)
 			}
-			fmt.Printf("COPIED :: %s\n", string(buf[:n]))
 			wb += int64(nw)
 		}
 		if err == io.EOF {

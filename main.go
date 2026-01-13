@@ -50,6 +50,7 @@ func main() {
 
 	fmt.Printf("[%s] s2 has %d peers\n", s2.Transport.Addr(), len(s2.GetPeers()))
 	s2.StoreData("mydatakey", bytes.NewReader([]byte("long_data_file111")))
+
 	// for i := 0; i < 10; i++ {
 	// 	if err := s2.StoreData(fmt.Sprintf("mydatakey%d", i), bytes.NewReader([]byte("long_data_file111"))); err != nil {
 	// 		fmt.Println("StoreData error:", err)

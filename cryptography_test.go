@@ -1,0 +1,257 @@
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"io"
+	"testing"
+
+	"golang.org/x/crypto/chacha20"
+)
+
+// generateKeyAndNonce creates random key and nonce for testing
+func generateKeyAndNonce() ([]byte, []byte, error) {
+	key := make([]byte, chacha20.KeySize)
+	nonce := make([]byte, chacha20.NonceSize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, nil, err
+	}
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, nil, err
+	}
+	return key, nonce, nil
+}
+
+// TestCryptoRoundtrip tests that encrypt followed by decrypt returns original data
+func TestCryptoRoundtrip(t *testing.T) {
+	key, nonce, err := generateKeyAndNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate key/nonce: %v", err)
+	}
+
+	testData := []byte("Hello, this is a test message for encryption!")
+
+	// Encrypt
+	src := bytes.NewReader(testData)
+	encrypted := new(bytes.Buffer)
+	n, err := encrypt(key, nonce, src, encrypted)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+	if n != int64(len(testData)) {
+		t.Errorf("Encrypted %d bytes, expected %d", n, len(testData))
+	}
+
+	// Verify encrypted data is different from original
+	if bytes.Equal(encrypted.Bytes(), testData) {
+		t.Error("Encrypted data should be different from original")
+	}
+
+	// Decrypt
+	decrypted := new(bytes.Buffer)
+	n, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	if err != nil {
+		t.Fatalf("Failed to decrypt: %v", err)
+	}
+	if n != int64(len(testData)) {
+		t.Errorf("Decrypted %d bytes, expected %d", n, len(testData))
+	}
+
+	// Verify decrypted data matches original
+	if !bytes.Equal(decrypted.Bytes(), testData) {
+		t.Errorf("Decrypted data doesn't match original.\nGot: %s\nExpected: %s",
+			decrypted.String(), string(testData))
+	}
+}
+
+// TestCryptoEmptyData tests encryption/decryption of empty data
+func TestCryptoEmptyData(t *testing.T) {
+	key, nonce, err := generateKeyAndNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate key/nonce: %v", err)
+	}
+
+	testData := []byte{}
+
+	// Encrypt
+	encrypted := new(bytes.Buffer)
+	_, err = encrypt(key, nonce, bytes.NewReader(testData), encrypted)
+	if err != nil {
+		t.Fatalf("Failed to encrypt empty data: %v", err)
+	}
+
+	// Decrypt
+	decrypted := new(bytes.Buffer)
+	_, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	if err != nil {
+		t.Fatalf("Failed to decrypt empty data: %v", err)
+	}
+
+	if len(decrypted.Bytes()) != 0 {
+		t.Errorf("Decrypted empty data should be empty, got %d bytes", len(decrypted.Bytes()))
+	}
+}
+
+// TestCryptoLargeData tests encryption/decryption of 1MB data
+func TestCryptoLargeData(t *testing.T) {
+	key, nonce, err := generateKeyAndNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate key/nonce: %v", err)
+	}
+
+	// Generate 1MB of random data
+	dataSize := 1024 * 1024 // 1MB
+	testData := make([]byte, dataSize)
+	if _, err := rand.Read(testData); err != nil {
+		t.Fatalf("Failed to generate random data: %v", err)
+	}
+
+	// Encrypt
+	encrypted := new(bytes.Buffer)
+	n, err := encrypt(key, nonce, bytes.NewReader(testData), encrypted)
+	if err != nil {
+		t.Fatalf("Failed to encrypt large data: %v", err)
+	}
+	if n != int64(dataSize) {
+		t.Errorf("Encrypted %d bytes, expected %d", n, dataSize)
+	}
+
+	// Decrypt
+	decrypted := new(bytes.Buffer)
+	n, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	if err != nil {
+		t.Fatalf("Failed to decrypt large data: %v", err)
+	}
+	if n != int64(dataSize) {
+		t.Errorf("Decrypted %d bytes, expected %d", n, dataSize)
+	}
+
+	// Verify data matches
+	if !bytes.Equal(decrypted.Bytes(), testData) {
+		t.Error("Decrypted large data doesn't match original")
+	}
+}
+
+// TestCryptoWrongKey tests that decryption with wrong key produces different data
+func TestCryptoWrongKey(t *testing.T) {
+	key1, nonce, err := generateKeyAndNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate key/nonce: %v", err)
+	}
+	key2 := make([]byte, chacha20.KeySize)
+	if _, err := rand.Read(key2); err != nil {
+		t.Fatalf("Failed to generate second key: %v", err)
+	}
+
+	testData := []byte("Secret message that should not be readable with wrong key")
+
+	// Encrypt with key1
+	encrypted := new(bytes.Buffer)
+	_, err = encrypt(key1, nonce, bytes.NewReader(testData), encrypted)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+
+	// Decrypt with key2 (wrong key)
+	decrypted := new(bytes.Buffer)
+	_, err = decrypt(key2, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	if err != nil {
+		t.Fatalf("Failed to decrypt: %v", err)
+	}
+
+	// Data decrypted with wrong key should NOT match original
+	if bytes.Equal(decrypted.Bytes(), testData) {
+		t.Error("Data decrypted with wrong key should not match original")
+	}
+}
+
+// TestCryptoStoreIntegration tests the store's encrypted write/read functions
+func TestCryptoStoreIntegration(t *testing.T) {
+	key, nonce, err := generateKeyAndNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate key/nonce: %v", err)
+	}
+
+	s := NewStore("./test_crypto_cas")
+	defer s.Wipe()
+
+	testData := []byte("Integration test data for encrypted store operations")
+	testKey := "crypto_test_key"
+
+	// Write encrypted
+	n, err := s.WriteStreamEncrypted(key, nonce, testKey, bytes.NewReader(testData))
+	if err != nil {
+		t.Fatalf("WriteStreamEncrypted failed: %v", err)
+	}
+	if n != int64(len(testData)) {
+		t.Errorf("Wrote %d bytes, expected %d", n, len(testData))
+	}
+
+	// Verify file exists
+	if !s.Has(testKey) {
+		t.Fatal("File should exist after WriteStreamEncrypted")
+	}
+
+	// Read encrypted data without decryption and verify it's different
+	_, rawReader, err := s.ReadStream(testKey)
+	if err != nil {
+		t.Fatalf("ReadStream failed: %v", err)
+	}
+	rawData, _ := io.ReadAll(rawReader)
+	rawReader.Close()
+
+	if bytes.Equal(rawData, testData) {
+		t.Error("Stored encrypted data should differ from plaintext")
+	}
+
+	// Read with decryption
+	_, decryptedReader, err := s.ReadStreamDecrypted(key, nonce, testKey)
+	if err != nil {
+		t.Fatalf("ReadStreamDecrypted failed: %v", err)
+	}
+	decryptedData, err := io.ReadAll(decryptedReader)
+	if err != nil {
+		t.Fatalf("Failed to read decrypted data: %v", err)
+	}
+	decryptedReader.Close()
+
+	// Verify decrypted data matches original
+	if !bytes.Equal(decryptedData, testData) {
+		t.Errorf("Decrypted data doesn't match.\nGot: %s\nExpected: %s",
+			string(decryptedData), string(testData))
+	}
+}
+
+// TestCryptoMultipleChunks tests data that spans multiple buffer chunks
+func TestCryptoMultipleChunks(t *testing.T) {
+	key, nonce, err := generateKeyAndNonce()
+	if err != nil {
+		t.Fatalf("Failed to generate key/nonce: %v", err)
+	}
+
+	// Create data larger than the 32KB buffer used in copyStream
+	dataSize := 100 * 1024 // 100KB (more than 3 chunks of 32KB each)
+	testData := make([]byte, dataSize)
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+
+	// Encrypt
+	encrypted := new(bytes.Buffer)
+	_, err = encrypt(key, nonce, bytes.NewReader(testData), encrypted)
+	if err != nil {
+		t.Fatalf("Failed to encrypt: %v", err)
+	}
+
+	// Decrypt
+	decrypted := new(bytes.Buffer)
+	_, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	if err != nil {
+		t.Fatalf("Failed to decrypt: %v", err)
+	}
+
+	// Verify
+	if !bytes.Equal(decrypted.Bytes(), testData) {
+		t.Error("Multi-chunk data doesn't match after roundtrip")
+	}
+}

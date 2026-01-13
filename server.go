@@ -79,7 +79,7 @@ func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) e
 	fmt.Println("Handling storefile msg...")
 	peer, ok := s.peers[from]
 	if !ok {
-		fmt.Println("Peer not found in peer map of [%s]: ", s.Transport.Addr())
+		fmt.Printf("Peer not found in peer map of [%s]\n", s.Transport.Addr())
 		return nil
 	}
 	fmt.Printf("%+v\n", msg)
@@ -105,7 +105,7 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 
 	peer, ok := s.peers[from]
 	if !ok {
-		fmt.Println("Peer not found in peer map of [%s]: ", s.Transport.Addr())
+		fmt.Printf("Peer not found in peer map of [%s]\n", s.Transport.Addr())
 		return nil
 	}
 	// first , send the stream flag
@@ -174,7 +174,7 @@ func (s *FileServer) broadcast(msg *Message) error {
 	for _, peer := range s.peers {
 		peer.Send([]byte{p2p.IncomingMessage})
 		if err := peer.Send(buf.Bytes()); err != nil {
-			fmt.Printf("Error sending message to peer %d\n: ", peer.LocalAddr().String(), err)
+			fmt.Printf("Error sending message to peer %s: %v\n", peer.LocalAddr().String(), err)
 			continue
 		}
 	}
@@ -205,7 +205,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 
 		n, err := s.s.WriteStream(key, io.LimitReader(peer, filesize))
 		if err != nil {
-			fmt.Printf("Error writing file to peer %s\n: ", peer.RemoteAddr().String(), err)
+			fmt.Printf("Error writing file to peer %s: %v\n", peer.RemoteAddr().String(), err)
 			continue
 		}
 		fmt.Printf("Received file [%s] of [%d] bytes over the network from peer: %s\n", key, n, peer.RemoteAddr().String())

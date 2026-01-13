@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -91,7 +92,12 @@ func (t *TCPTransport) Close() error {
 
 // Incoming connection
 func (t *TCPTransport) ListenAndAccept() error {
-	conn, err := net.Listen("tcp", t.ListenPort)
+	// Use ListenConfig with Control function to set SO_REUSEADDR
+	// This allows the port to be reused immediately after the application stops
+	lc := net.ListenConfig{
+		Control: setSocketReuseAddr,
+	}
+	conn, err := lc.Listen(context.Background(), "tcp", t.ListenPort)
 	if err != nil {
 		return err
 	}

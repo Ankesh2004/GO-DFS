@@ -95,7 +95,26 @@ func (s *Store) ReadStream(key string) (int64, io.ReadCloser, error) {
 	return fi.Size(), file, nil
 }
 
-func (s *Store) ReadStreamDecyrpted(encKey []byte, encNonce []byte, key string) (int64, io.ReadCloser, error) {
+// decryptedReader wraps the pipe reader and source file to properly close both
+type decryptedReader struct {
+	pr   *io.PipeReader
+	file *os.File
+}
+
+func (d *decryptedReader) Read(p []byte) (n int, err error) {
+	return d.pr.Read(p)
+}
+
+func (d *decryptedReader) Close() error {
+	prErr := d.pr.Close()
+	fileErr := d.file.Close()
+	if prErr != nil {
+		return prErr
+	}
+	return fileErr
+}
+
+func (s *Store) ReadStreamDecrypted(encKey []byte, encNonce []byte, key string) (int64, io.ReadCloser, error) {
 	fullPath := s.getCASPath(key).FullPath()
 	file, err := os.Open(fullPath)
 	if err != nil {
@@ -110,14 +129,13 @@ func (s *Store) ReadStreamDecyrpted(encKey []byte, encNonce []byte, key string) 
 	pr, pw := io.Pipe()
 	go func() {
 		defer pw.Close()
+		defer file.Close() // Close file after decryption completes
 		_, err := decrypt(encKey, encNonce, file, pw)
 		if err != nil {
-			fmt.Println("Failed to decrypt", err)
+			pw.CloseWithError(fmt.Errorf("failed to decrypt: %w", err))
 		}
 	}()
-	// NOTE: WE ARE NOT CLOSING THE file (WHICH ACTS AS READER) HERE,
-	// HENCE, WE NEED TO CLOSE IT WHEREVER WE CALL ReadStream() function
-	return fi.Size(), pr, nil
+	return fi.Size(), &decryptedReader{pr: pr, file: file}, nil
 }
 
 func (s *Store) DeleteStream(key string) error {
