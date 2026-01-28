@@ -243,11 +243,12 @@ func (s *FileServer) StoreData(key string, r io.Reader) error {
 
 	for _, peer := range s.peers {
 		peer.Send([]byte{p2p.IncomingStream})
-		n, err := io.Copy(peer, fileBuffer)
+		// creating a new reader for each peer to avoid reader exhaustion
+		n, err := io.Copy(peer, bytes.NewReader(fileBuffer.Bytes()))
 		if err != nil {
 			return err
 		}
-		fmt.Println("received and wrote ", n, " bytes over the network to peer: ", peer.RemoteAddr().String())
+		fmt.Printf("[%s] Sent %d bytes to peer: %s\n", s.Transport.Addr(), n, peer.RemoteAddr())
 	}
 	return nil
 

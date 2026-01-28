@@ -1,13 +1,14 @@
 package p2p
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
+	"time"
 )
 
 // ================== TCP Peer ==========================
@@ -92,18 +93,16 @@ func (t *TCPTransport) Close() error {
 
 // Incoming connection
 func (t *TCPTransport) ListenAndAccept() error {
-	// Use ListenConfig with Control function to set SO_REUSEADDR
-	// This allows the port to be reused immediately after the application stops
-	lc := net.ListenConfig{
-		Control: setSocketReuseAddr,
-	}
-	conn, err := lc.Listen(context.Background(), "tcp", t.ListenPort)
+	// THERE WAS A BUG HERE:
+	// Use standard net.Listen instead of ListenConfig
+	// The custom setSocketReuseAddr was causing Accept() to never return on Windows
+	listener, err := net.Listen("tcp", t.ListenPort)
 	if err != nil {
 		return err
 	}
-	t.Listener = conn
+	t.Listener = listener
 
-	go t.acceptLoop() // run multiple accept loops so that if one is busy then other can accept new connections
+	go t.acceptLoop()
 	fmt.Println("Listening on port ", t.ListenPort)
 	return nil
 }
@@ -116,6 +115,8 @@ func (t *TCPTransport) Dial(addr string) error {
 		log.Fatal("Failed to dial up: ", addr)
 		return err
 	}
+	// small delay to let the other side's Accept() complete before we start handshake
+	time.Sleep(100 * time.Millisecond)
 	go t.handleConnection(conn, true)
 	return nil
 }
@@ -124,7 +125,6 @@ func (t *TCPTransport) acceptLoop() {
 	fmt.Println("Starting accept loop")
 	for {
 		conn, err := t.Listener.Accept()
-		// if listener is closed then return
 		if errors.Is(err, net.ErrClosed) {
 			return
 		}
@@ -132,8 +132,14 @@ func (t *TCPTransport) acceptLoop() {
 			log.Fatal("Accept error: ", err)
 			continue
 		}
-		//enables multiple peers at once
-		go t.handleConnection(conn, false)
+		go func(c net.Conn) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[PANIC] in handleConnection: %v\n", r)
+				}
+			}()
+			t.handleConnection(c, false)
+		}(conn)
 	}
 }
 
@@ -147,8 +153,8 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 		log.Fatal("Failed to create peer")
 		return
 	}
-	if t.Handshake(peer) != nil {
-		log.Fatal("Failed to handshake")
+	if err := t.Handshake(peer); err != nil {
+		log.Printf("Handshake failed: %v", err)
 		return
 	}
 	fmt.Println("New connection....", peer)
@@ -160,23 +166,17 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 		}
 	}
 
-	//now accept rpcs ---> decode ---> send to rpc channel
-	// read loop
+	// read loop - after SecureHandshake, peer.Conn is encrypted SecurePeer
 	for {
 		rpc := RPC{}
-		// This error can be due to 2 reasons:
-		// 1. payload was not correct ---> continue
-		// 2. the connection is dropped ---> here if we continue then we will go into read loop forever, wasting server's compute for a dead connection
-		// ---> here we have to break the loop somehow  TODO
-		if err := t.Decoder.Decode(conn, &rpc); err != nil {
+		if err := t.Decoder.Decode(peer, &rpc); err != nil {
 			if errors.Is(err, io.EOF) {
-				// Connection closed gracefully by the other side
 				break
 			}
-			fmt.Println("failed to decodeeee", err)
+			fmt.Printf("Decode error: %v\n", err)
 			break
 		}
-		rpc.From = conn.RemoteAddr().String()
+		rpc.From = peer.RemoteAddr().String()
 		if rpc.isStream {
 			peer.(*TCPPeer).Wg.Add(1)
 			fmt.Println("Waiting till stream finishes...")
