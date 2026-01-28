@@ -112,7 +112,7 @@ func (t *TCPTransport) ListenAndAccept() error {
 func (t *TCPTransport) Dial(addr string) error {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		log.Fatal("Failed to dial up: ", addr)
+		log.Printf("Failed to dial up: %s error: %v", addr, err)
 		return err
 	}
 	// small delay to let the other side's Accept() complete before we start handshake
@@ -129,7 +129,7 @@ func (t *TCPTransport) acceptLoop() {
 			return
 		}
 		if err != nil {
-			log.Fatal("Accept error: ", err)
+			log.Printf("Accept error: %v", err)
 			continue
 		}
 		go func(c net.Conn) {
@@ -150,7 +150,7 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 	}()
 	peer, err := NewTCPPeer(isOutbound, conn)
 	if err != nil {
-		log.Fatal("Failed to create peer")
+		log.Printf("Failed to create peer: %v", err)
 		return
 	}
 	if err := t.Handshake(peer); err != nil {
