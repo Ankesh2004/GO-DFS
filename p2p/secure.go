@@ -187,6 +187,9 @@ func SecureHandshake(peer Peer) error {
 
 	// compute shared secret via ECDH
 	sharedSecret, err := curve25519.X25519(privKey[:], peerPubKey)
+	// zero out private key immediately after use
+	zero(privKey[:])
+
 	if err != nil {
 		return fmt.Errorf("failed to compute shared secret: %w", err)
 	}
@@ -199,12 +202,18 @@ func SecureHandshake(peer Peer) error {
 	// 32 bytes for write key + 32 bytes for read key = 64 bytes total
 	keyMaterial := make([]byte, 64)
 	if _, err := io.ReadFull(hkdfReader, keyMaterial); err != nil {
+		// zero out shared secret even on error
+		zero(sharedSecret)
 		return fmt.Errorf("failed to derive keys: %w", err)
 	}
 
 	// the outbound side uses first 32 bytes for writing, second 32 for reading
 	// the inbound side uses first 32 bytes for reading, second 32 for writing
 	// this ensures: outbound.writeKey == inbound.readKey and vice versa
+
+	// zero out shared secret after HKDF derivation
+	zero(sharedSecret)
+
 	var writeKey, readKey []byte
 	if tcpPeer.isOutbound {
 		writeKey = keyMaterial[:32]
@@ -217,12 +226,19 @@ func SecureHandshake(peer Peer) error {
 	// create the AEAD ciphers
 	encCipher, err := chacha20poly1305.New(writeKey)
 	if err != nil {
+		// zero out key material on error
+		zero(keyMaterial)
 		return fmt.Errorf("failed to create encryption cipher: %w", err)
 	}
 	decCipher, err := chacha20poly1305.New(readKey)
 	if err != nil {
+		// zero out key material on error
+		zero(keyMaterial)
 		return fmt.Errorf("failed to create decryption cipher: %w", err)
 	}
+
+	// zero out key material after initializing ciphers
+	zero(keyMaterial)
 
 	// build the SecurePeer wrapper
 	securePeer := &SecurePeer{
@@ -239,4 +255,11 @@ func SecureHandshake(peer Peer) error {
 	tcpPeer.Conn = securePeer
 
 	return nil
+}
+
+// zero : used for clearing sensitive data from memory (avoiding memory leaks)
+func zero(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
