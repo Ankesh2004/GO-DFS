@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"time"
 )
 
 // ================== TCP Peer ==========================
@@ -18,21 +17,33 @@ type TCPPeer struct {
 	// isOutbound := false if we are the one who accepted the connection
 	isOutbound bool
 	Wg         *sync.WaitGroup
+
+	// tracks if there's actually a stream in progress - prevents negative WaitGroup
+	// when CloseStream is called without an active stream
+	streamMu     sync.Mutex
+	streamActive bool
 }
 
 func NewTCPPeer(isOutbound bool, conn net.Conn) (Peer, error) {
 	p := &TCPPeer{
-		isOutbound: isOutbound,
-		Conn:       conn,
-		Wg:         &sync.WaitGroup{},
+		isOutbound:   isOutbound,
+		Conn:         conn,
+		Wg:           &sync.WaitGroup{},
+		streamActive: false,
 	}
 	// p.wg.Add(1)
 	return p, nil
 }
 
 func (p *TCPPeer) CloseStream() error {
-	p.Wg.Done()
-	// return p.Conn.Close()
+	p.streamMu.Lock()
+	defer p.streamMu.Unlock()
+
+	// only call Done if we actually had an active stream - prevents panic on negative wg
+	if p.streamActive {
+		p.streamActive = false
+		p.Wg.Done()
+	}
 	return nil
 }
 
@@ -115,8 +126,8 @@ func (t *TCPTransport) Dial(addr string) error {
 		log.Printf("Failed to dial up: %s error: %v", addr, err)
 		return err
 	}
-	// small delay to let the other side's Accept() complete before we start handshake
-	time.Sleep(100 * time.Millisecond)
+	// TCP's 3-way handshake guarantees the remote's Accept() is complete before Dial() returns
+	// our app-level Handshake in handleConnection provides the actual synchronization
 	go t.handleConnection(conn, true)
 	return nil
 }
@@ -178,9 +189,13 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 		}
 		rpc.From = peer.RemoteAddr().String()
 		if rpc.isStream {
-			peer.(*TCPPeer).Wg.Add(1)
+			tcpPeer := peer.(*TCPPeer)
+			tcpPeer.streamMu.Lock()
+			tcpPeer.streamActive = true
+			tcpPeer.Wg.Add(1)
+			tcpPeer.streamMu.Unlock()
 			fmt.Println("Waiting till stream finishes...")
-			peer.(*TCPPeer).Wg.Wait()
+			tcpPeer.Wg.Wait()
 			fmt.Println("Stream done")
 			continue
 		}
