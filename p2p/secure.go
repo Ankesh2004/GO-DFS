@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 
+	"sync"
+
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
@@ -26,6 +28,8 @@ type SecurePeer struct {
 	encNonce []byte      // 12-byte nonce for writes, incremented after each frame
 	decNonce []byte      // 12-byte nonce for reads, incremented after each frame
 	leftover []byte      // leftover decrypted data from partial reads
+	writeMu  sync.Mutex  // guards Write for concurrent access
+	readMu   sync.Mutex  // guards Read for concurrent access
 }
 
 // we will write : [Length (4 bytes)] + [Ciphertext] OVER THE WIRE
@@ -56,6 +60,9 @@ func (s *SecurePeer) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	// break large writes into chunks (maxFrameSize plaintext per frame)
 	totalWritten := 0
 	for len(p) > 0 {
@@ -85,6 +92,9 @@ func (s *SecurePeer) Write(p []byte) (int, error) {
 // Read decrypts and returns data from the wire
 // Handles partial reads by buffering leftover plaintext
 func (s *SecurePeer) Read(p []byte) (int, error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+
 	// first, drain any leftover data from previous reads
 	if len(s.leftover) > 0 {
 		n := copy(p, s.leftover)
