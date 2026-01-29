@@ -22,6 +22,7 @@ func createServer(addr string, nodes ...string) *FileServer {
 		// OnPeer:     OnPeerTest,
 	})
 	options := FileServerOptions{
+		ID:              addr[8:12], // Extract port as ID (e.g., "5000" from "0.0.0.0:5000")
 		rootDir:         "./cas" + addr[8:12],
 		Transport:       transport,
 		BooststrapNodes: nodes,
