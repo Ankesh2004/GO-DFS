@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/p2p"
-	"golang.org/x/crypto/chacha20"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type Payload struct {
@@ -36,8 +36,7 @@ type FileServer struct {
 	peersLock sync.Mutex
 
 	// for encryption
-	key   []byte
-	nonce []byte
+	key []byte
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
@@ -45,14 +44,10 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		options.rootDir,
 	)
 
-	// Generate cryptographically secure random key and nonce
-	key := make([]byte, chacha20.KeySize)
-	nonce := make([]byte, chacha20.NonceSize)
+	// Generate cryptographically secure random key
+	key := make([]byte, chacha20poly1305.KeySize)
 	if _, err := rand.Read(key); err != nil {
 		panic(fmt.Sprintf("failed to generate encryption key: %v", err))
-	}
-	if _, err := rand.Read(nonce); err != nil {
-		panic(fmt.Sprintf("failed to generate nonce: %v", err))
 	}
 
 	return &FileServer{
@@ -61,7 +56,6 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		quitChannel:       make(chan struct{}),
 		peers:             make(map[string]p2p.Peer),
 		key:               key,
-		nonce:             nonce,
 	}
 }
 
@@ -83,7 +77,7 @@ func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) e
 		return nil
 	}
 	fmt.Printf("%+v\n", msg)
-	n, err := s.s.WriteStream(msg.Key, io.LimitReader(peer, msg.Size))
+	n, err := s.s.WriteStreamEncrypted(s.key, msg.Key, io.LimitReader(peer, msg.Size))
 	if err != nil {
 		return err
 	}
@@ -97,7 +91,7 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 		return fmt.Errorf("Need to serve %s to peer %s, but file not found in local disk of [%s]", msg.Key, from, s.Transport.Addr())
 	}
 	fmt.Printf("[%s] serving file over network to [%s]\n", s.Transport.Addr(), from)
-	fileSize, r, err := s.s.ReadStream(msg.Key)
+	fileSize, r, err := s.s.ReadStreamDecrypted(s.key, msg.Key)
 	if err != nil {
 		return err
 	}
@@ -184,7 +178,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	// check in local storage first
 	if s.s.Has(key) {
 		fmt.Printf("[%s] Serving file [%s] from local disk of [%s]", s.Transport.Addr(), key, s.Transport.Addr())
-		_, r, err := s.s.ReadStream(key)
+		_, r, err := s.s.ReadStreamDecrypted(s.key, key)
 		return r, err
 	}
 	// fetch from the peers in the network
@@ -203,7 +197,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 		var filesize int64
 		binary.Read(peer, binary.LittleEndian, &filesize)
 
-		n, err := s.s.WriteStream(key, io.LimitReader(peer, filesize))
+		n, err := s.s.WriteStreamEncrypted(s.key, key, io.LimitReader(peer, filesize))
 		if err != nil {
 			fmt.Printf("Error writing file to peer %s: %v\n", peer.RemoteAddr().String(), err)
 			continue
@@ -211,7 +205,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 		fmt.Printf("Received file [%s] of [%d] bytes over the network from peer: %s\n", key, n, peer.RemoteAddr().String())
 		peer.CloseStream()
 	}
-	_, r, err := s.s.ReadStream(key)
+	_, r, err := s.s.ReadStreamDecrypted(s.key, key)
 	return r, err
 }
 func (s *FileServer) StoreData(key string, r io.Reader) error {
@@ -222,7 +216,7 @@ func (s *FileServer) StoreData(key string, r io.Reader) error {
 	tee := io.TeeReader(r, fileBuffer) // tee reads from reader r and writes to fileBuffer too
 	// because if we directly write to local then reader will become empty , so we need to store in fileBuffer
 	// also so that it can be broadcasted later
-	n, err := s.s.WriteStream(key, tee)
+	n, err := s.s.WriteStreamEncrypted(s.key, key, tee)
 	if err != nil {
 		return err
 	}
