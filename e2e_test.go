@@ -11,7 +11,7 @@ import (
 )
 
 // Helper to create a test server with unique port and directory
-func createTestServer(port string, bootstrap []string, t *testing.T) *FileServer {
+func createTestServer(port string, bootstrap []string, t *testing.T, keepKey bool) *FileServer {
 	addr := ":" + port
 	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
 		ListenPort: addr,
@@ -21,10 +21,16 @@ func createTestServer(port string, bootstrap []string, t *testing.T) *FileServer
 
 	// Use unique test directories
 	dir := "./test_cas_" + port
-	// Clean up previous runs
-	os.RemoveAll(dir)
+
+	// If keepKey is false (default start), wipe everything.
+	// If keepKey is true (restart), wipe nothing.
+	if !keepKey {
+		os.RemoveAll(dir)
+		os.Remove(port + ".key")
+	}
 
 	options := FileServerOptions{
+		ID:              port, // Use port as ID for key file
 		rootDir:         dir,
 		Transport:       transport,
 		BooststrapNodes: bootstrap,
@@ -36,12 +42,12 @@ func createTestServer(port string, bootstrap []string, t *testing.T) *FileServer
 
 func TestEndToEndIntegrity(t *testing.T) {
 	// Setup Server 1 (port 6000)
-	s1 := createTestServer("6000", nil, t)
+	s1 := createTestServer("6000", nil, t, false)
 	defer s1.Stop()
 	defer os.RemoveAll("./test_cas_6000") // Cleanup
 
 	// Setup Server 2 (port 6001), bootstrapping to s1
-	s2 := createTestServer("6001", []string{":6000"}, t)
+	s2 := createTestServer("6001", []string{":6000"}, t, false)
 	defer s2.Stop()
 	defer os.RemoveAll("./test_cas_6001") // Cleanup
 
@@ -137,10 +143,40 @@ func TestEndToEndIntegrity(t *testing.T) {
 		t.Log("SUCCESS: S1 and S2 have different encrypted files (Unique Nonces confirmed).")
 	}
 
-	// 4. Verify comparing encrypted vs unencrypted (User Request)
+	// 4. Verify comparing encrypted vs unencrypted
 	if bytes.Equal(encryptedContentS2, originalData) {
 		t.Errorf("FAIL: Encrypted data matches plaintext!")
 	} else {
 		t.Log("SUCCESS: Encrypted data != Plaintext data.")
+	}
+
+	// 5. Verify Persistence (Simulate Restart)
+	t.Log("--- Persistence Verification (Restart S1) ---")
+	// Stop S1
+	s1.Stop()
+	time.Sleep(500 * time.Millisecond)
+
+	// Restart S1 with SAME ID "6000" (should load existing key)
+	// Note: We don't remove the directory or the key file this time
+	s1Restarted := createTestServer("6000", nil, t, true)
+	// We need to verify it loaded the OLD key, not generated a NEW one.
+	// We can prove this by reading the encrypted file we wrote earlier.
+
+	// Try to read the file with the restarted server
+	rRestarted, err := s1Restarted.GetFile(testKey)
+	if err != nil {
+		t.Fatalf("Restarted S1 failed to find local file: %v", err)
+	}
+	// Decrypt it
+	restartedData, err := io.ReadAll(rRestarted)
+	if err != nil {
+		t.Fatalf("Restarted S1 failed to decrypt file (Wrong Key?): %v", err)
+	}
+	rRestarted.(io.Closer).Close()
+
+	if !bytes.Equal(restartedData, originalData) {
+		t.Errorf("FAIL: Restarted S1 decrypted garbage! Persistence failed.")
+	} else {
+		t.Log("SUCCESS: Restarted S1 successfully decrypted data using persisted key.")
 	}
 }

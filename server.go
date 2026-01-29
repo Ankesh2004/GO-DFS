@@ -7,6 +7,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -20,6 +21,7 @@ type Payload struct {
 }
 
 type FileServerOptions struct {
+	ID      string
 	rootDir string
 	// ?? is get cas func req ?
 	Transport       p2p.Transport
@@ -44,10 +46,9 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		options.rootDir,
 	)
 
-	// Generate cryptographically secure random key
-	key := make([]byte, chacha20poly1305.KeySize)
-	if _, err := rand.Read(key); err != nil {
-		panic(fmt.Sprintf("failed to generate encryption key: %v", err))
+	key, err := loadOrGenerateKey(options.ID)
+	if err != nil {
+		panic(fmt.Sprintf("failed to load/generate key: %v", err))
 	}
 
 	return &FileServer{
@@ -57,6 +58,34 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		peers:             make(map[string]p2p.Peer),
 		key:               key,
 	}
+}
+
+func loadOrGenerateKey(id string) ([]byte, error) {
+	keyPath := fmt.Sprintf("%s.key", id)
+	// 1. Try to load
+	if _, err := os.Stat(keyPath); err == nil {
+		key, err := os.ReadFile(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read key file: %w", err)
+		}
+		if len(key) != chacha20poly1305.KeySize {
+			return nil, fmt.Errorf("key file is corrupted (size %d)", len(key))
+		}
+		return key, nil
+	}
+
+	// 2. Generate new
+	key := make([]byte, chacha20poly1305.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+
+	// 3. Save for persistence
+	if err := os.WriteFile(keyPath, key, 0600); err != nil {
+		return nil, fmt.Errorf("failed to save key file: %w", err)
+	}
+	fmt.Printf("[%s] Generated and saved new encryption key to %s\n", id, keyPath)
+	return key, nil
 }
 
 func (s *FileServer) handleMessage(from string, msg *Message) error {
@@ -271,8 +300,12 @@ func (s *FileServer) Start() error {
 }
 
 func (s *FileServer) Stop() error {
-	// send signal to quit the loop
-	close(s.quitChannel)
+	select {
+	case <-s.quitChannel:
+		return nil // already closed
+	default:
+		close(s.quitChannel)
+	}
 	return nil
 }
 
