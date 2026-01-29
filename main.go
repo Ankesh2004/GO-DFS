@@ -14,6 +14,8 @@ func OnPeerTest(peer p2p.Peer) error {
 	return nil
 }
 
+// createServer creates and returns a FileServer configured to listen on addr and use the given bootstrap nodes.
+// The server is initialized with a TCP transport using a secure handshake and sample decoder; the server ID and rootDir are derived from the port substring of addr (addr[8:12]), and the transport's OnPeer callback is wired to the server's OnPeer handler.
 func createServer(addr string, nodes ...string) *FileServer {
 	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
 		ListenPort: addr,

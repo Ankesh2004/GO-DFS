@@ -16,7 +16,12 @@ const (
 
 // encrypt uses ChaCha20-Poly1305 to encrypt data from src to dst.
 // It uses a chunked format: [4-byte length][ciphertext + tag].
-// It increments the nonce for each chunk.
+// encrypt reads plaintext from src and writes ChaCha20-Poly1305–encrypted frames to dst.
+// 
+// It copies the provided nonce, encrypts the input in up to 32KB chunks, and for each chunk
+// writes a 4-byte little-endian length followed by the ciphertext. The nonce is incremented
+// once per chunk so each frame is encrypted with a distinct nonce. Returns the total number
+// of bytes written to dst (including 4-byte frame headers) and any error encountered.
 func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
@@ -62,6 +67,15 @@ func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 	return totalWritten, nil
 }
 
+// decrypt reads a stream of framed ChaCha20-Poly1305 ciphertexts from src,
+// decrypts each frame using key and nonce, and writes the concatenated
+// plaintext to dst.
+// 
+// Frames are encoded as a 4-byte little-endian length followed by that many
+// bytes of ciphertext. The provided nonce is copied and incremented once per
+// frame; if a frame fails to decrypt or an I/O error occurs, the function
+// returns the number of plaintext bytes successfully written and the error.
+// It returns (totalWritten, nil) when the input reaches EOF normally.
 func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
@@ -106,6 +120,9 @@ func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 	return totalWritten, nil
 }
 
+// incrementNonce increments nonce by one, treating the slice as a little-endian unsigned integer.
+// It increments bytes starting at index 0 and stops when a byte does not wrap to zero.
+// If all bytes wrap, the nonce becomes zero (full wraparound).
 func incrementNonce(nonce []byte) {
 	for i := 0; i < len(nonce); i++ {
 		nonce[i]++

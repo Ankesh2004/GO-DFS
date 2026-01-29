@@ -41,6 +41,11 @@ type FileServer struct {
 	key []byte
 }
 
+// NewFileServer creates and initializes a FileServer configured by options.
+// It constructs the local store at options.rootDir, loads or generates a persistent
+// encryption key for options.ID (saving it to disk if newly generated), and returns
+// a FileServer with its quit channel, peers map, and encryption key populated.
+// NewFileServer panics if the key cannot be loaded or generated.
 func NewFileServer(options FileServerOptions) *FileServer {
 	store := NewStore(
 		options.rootDir,
@@ -60,6 +65,11 @@ func NewFileServer(options FileServerOptions) *FileServer {
 	}
 }
 
+// loadOrGenerateKey loads a ChaCha20-Poly1305 key from "<id>.key" if it exists, otherwise it
+// generates a new key, saves it to that path with permission 0600, and returns it.
+// 
+// The returned byte slice is the encryption key and must have length chacha20poly1305.KeySize.
+// An error is returned if reading, validating, generating, or persisting the key fails.
 func loadOrGenerateKey(id string) ([]byte, error) {
 	keyPath := fmt.Sprintf("%s.key", id)
 	// 1. Try to load
