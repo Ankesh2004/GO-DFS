@@ -19,6 +19,10 @@ const (
 // It uses a chunked format: [4-byte length][ciphertext + tag].
 // It increments the nonce for each chunk.
 func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
+	if len(nonce) != nonceSize {
+		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", nonceSize, len(nonce))
+	}
+
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return 0, err
@@ -67,6 +71,10 @@ func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 }
 
 func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
+	if len(nonce) != nonceSize {
+		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", nonceSize, len(nonce))
+	}
+
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return 0, err

@@ -250,8 +250,9 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 		// Stream encrypt directly to pipe
 		_, err := encrypt(userEncryptionKey, userNonce, r, pw)
 		if err != nil {
-			encryptErr <- fmt.Errorf("user encryption failed: %w", err)
+			err = fmt.Errorf("user encryption failed: %w", err)
 			pw.CloseWithError(err)
+			encryptErr <- err
 			return
 		}
 		encryptErr <- nil
@@ -264,16 +265,26 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 	storagePR, storagePW := io.Pipe()
 	counter.w = storagePW
 
-	// Writijg to storage in background
+	// Writing to storage in background
 	storageErr := make(chan error, 1)
 	go func() {
+		defer storagePR.Close() // Ensure reader closes to unblock writer
 		_, err := s.s.WriteStream(key, storagePR)
 		storageErr <- err
 	}()
 
 	// Copy from encryption pipe through counter to storage
 	_, copyErr := io.Copy(counter, pr)
-	storagePW.Close() // Signal storage write complete
+
+	// IMPORTANT: Close reader to unblock writer goroutine if io.Copy finishes early
+	pr.Close()
+
+	if copyErr != nil {
+		storagePW.CloseWithError(copyErr)
+		pw.CloseWithError(copyErr)
+	} else {
+		storagePW.Close()
+	}
 
 	if err := <-encryptErr; err != nil {
 		return err
@@ -320,7 +331,9 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 		// Multiwrite to all peers simultaneously
 		if len(peerWriters) > 0 {
 			peerMW := io.MultiWriter(peerWriters...)
-			io.Copy(peerMW, dataReader)
+			if _, err := io.Copy(peerMW, dataReader); err != nil {
+				return fmt.Errorf("failed to broadcast to peers: %w", err)
+			}
 		}
 	}
 
