@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/p2p"
-	"golang.org/x/crypto/chacha20"
 )
 
 type Payload struct {
@@ -20,6 +19,7 @@ type Payload struct {
 }
 
 type FileServerOptions struct {
+	ID      string
 	rootDir string
 	// ?? is get cas func req ?
 	Transport       p2p.Transport
@@ -34,10 +34,6 @@ type FileServer struct {
 
 	peers     map[string]p2p.Peer
 	peersLock sync.Mutex
-
-	// for encryption
-	key   []byte
-	nonce []byte
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
@@ -45,23 +41,11 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		options.rootDir,
 	)
 
-	// Generate cryptographically secure random key and nonce
-	key := make([]byte, chacha20.KeySize)
-	nonce := make([]byte, chacha20.NonceSize)
-	if _, err := rand.Read(key); err != nil {
-		panic(fmt.Sprintf("failed to generate encryption key: %v", err))
-	}
-	if _, err := rand.Read(nonce); err != nil {
-		panic(fmt.Sprintf("failed to generate nonce: %v", err))
-	}
-
 	return &FileServer{
 		FileServerOptions: options,
 		s:                 store,
 		quitChannel:       make(chan struct{}),
 		peers:             make(map[string]p2p.Peer),
-		key:               key,
-		nonce:             nonce,
 	}
 }
 
@@ -83,6 +67,7 @@ func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) e
 		return nil
 	}
 	fmt.Printf("%+v\n", msg)
+	// Zero Trust: Store the RAW encrypted blob received from user (via peer). Do not re-encrypt.
 	n, err := s.s.WriteStream(msg.Key, io.LimitReader(peer, msg.Size))
 	if err != nil {
 		return err
@@ -97,6 +82,9 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 		return fmt.Errorf("Need to serve %s to peer %s, but file not found in local disk of [%s]", msg.Key, from, s.Transport.Addr())
 	}
 	fmt.Printf("[%s] serving file over network to [%s]\n", s.Transport.Addr(), from)
+
+	// Zero Trust: Read RAW encrypted blob to send to peer. Do not attempt to decrypt.
+	// Note: ReadStream returns (size, reader, error)
 	fileSize, r, err := s.s.ReadStream(msg.Key)
 	if err != nil {
 		return err
@@ -171,9 +159,15 @@ func (s *FileServer) broadcast(msg *Message) error {
 	if err := gob.NewEncoder(buf).Encode(msg); err != nil {
 		return err
 	}
+	msgBytes := buf.Bytes()
+	msgLen := uint32(len(msgBytes))
+
 	for _, peer := range s.peers {
 		peer.Send([]byte{p2p.IncomingMessage})
-		if err := peer.Send(buf.Bytes()); err != nil {
+		if err := binary.Write(peer, binary.LittleEndian, msgLen); err != nil {
+			return err
+		}
+		if err := peer.Send(msgBytes); err != nil {
 			fmt.Printf("Error sending message to peer %s: %v\n", peer.LocalAddr().String(), err)
 			continue
 		}
@@ -184,6 +178,8 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	// check in local storage first
 	if s.s.Has(key) {
 		fmt.Printf("[%s] Serving file [%s] from local disk of [%s]", s.Transport.Addr(), key, s.Transport.Addr())
+		// When retrieving a file that was stored with user encryption, we should read it
+		// as a raw stream. The node does not hold any keys to decrypt it.
 		_, r, err := s.s.ReadStream(key)
 		return r, err
 	}
@@ -203,6 +199,8 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 		var filesize int64
 		binary.Read(peer, binary.LittleEndian, &filesize)
 
+		// When receiving a file that was stored with user encryption, we should write it
+		// as a raw stream. The node does not hold any keys to decrypt or re-encrypt it.
 		n, err := s.s.WriteStream(key, io.LimitReader(peer, filesize))
 		if err != nil {
 			fmt.Printf("Error writing file to peer %s: %v\n", peer.RemoteAddr().String(), err)
@@ -214,53 +212,132 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	_, r, err := s.s.ReadStream(key)
 	return r, err
 }
-func (s *FileServer) StoreData(key string, r io.Reader) error {
-	// 1. write to local storage
-	// 2. send to all known peers
 
-	fileBuffer := new(bytes.Buffer)
-	tee := io.TeeReader(r, fileBuffer) // tee reads from reader r and writes to fileBuffer too
-	// because if we directly write to local then reader will become empty , so we need to store in fileBuffer
-	// also so that it can be broadcasted later
-	n, err := s.s.WriteStream(key, tee)
-	if err != nil {
+// CountingWriter tracks bytes written
+type CountingWriter struct {
+	w     io.Writer
+	count int64
+}
+
+func (cw *CountingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.count += int64(n)
+	return n, err
+}
+
+func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader) error {
+	// Generate nonce for the user layer
+	userNonce := make([]byte, 12)
+	if _, err := rand.Read(userNonce); err != nil {
 		return err
 	}
-	// 2.1 first a msg is sent
+
+	// Create pipe for streaming encryption
+	pr, pw := io.Pipe()
+
+	// Encrypt in background goroutine
+	encryptErr := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+
+		// Write nonce first
+		if _, err := pw.Write(userNonce); err != nil {
+			pw.CloseWithError(err)
+			encryptErr <- err
+			return
+		}
+
+		// Stream encrypt directly to pipe
+		_, err := encrypt(userEncryptionKey, userNonce, r, pw)
+		if err != nil {
+			err = fmt.Errorf("user encryption failed: %w", err)
+			pw.CloseWithError(err)
+			encryptErr <- err
+			return
+		}
+		encryptErr <- nil
+	}()
+
+	// Use the global CountingWriter type
+	counter := &CountingWriter{}
+
+	// Create pipe for storage
+	storagePR, storagePW := io.Pipe()
+	counter.w = storagePW
+
+	// Writijg to storage in background
+	storageErr := make(chan error, 1)
+	go func() {
+		defer storagePR.Close() // Ensure reader closes to unblock writer
+		_, err := s.s.WriteStream(key, storagePR)
+		storageErr <- err
+	}()
+
+	// Copy from encryption pipe through counter to storage
+	_, copyErr := io.Copy(counter, pr)
+
+	// IMPORTANT: Close reader to unblock writer goroutine if io.Copy finishes early
+	pr.Close()
+
+	if copyErr != nil {
+		storagePW.CloseWithError(copyErr)
+		pw.CloseWithError(copyErr)
+	} else {
+		storagePW.Close()
+	}
+
+	if err := <-encryptErr; err != nil {
+		return err
+	}
+
+	if copyErr != nil {
+		return fmt.Errorf("streaming to storage failed: %w", copyErr)
+	}
+
+	if err := <-storageErr; err != nil {
+		return fmt.Errorf("local storage failed: %w", err)
+	}
+
+	actualSize := counter.count
+
+	// Broadcast metadata to Peers
 	msg := Message{
 		Payload: MessageStoreFile{
 			Key:  key,
-			Size: n,
+			Size: actualSize,
 		},
 	}
 	if err := s.broadcast(&msg); err != nil {
 		return err
 	}
 
-	//2.2 now we will send the actual file
-	time.Sleep(5 * time.Millisecond)
-	// TODO: use multiwriter
+	// No sleep needed anymore due to framed message protocol
 
-	for _, peer := range s.peers {
-		peer.Send([]byte{p2p.IncomingStream})
-		// creating a new reader for each peer to avoid reader exhaustion
-		n, err := io.Copy(peer, bytes.NewReader(fileBuffer.Bytes()))
+	// Read from local storage and multicast to all peers (no RAM buffer! but increase one disk read ;())
+	if len(s.peers) > 0 {
+		_, dataReader, err := s.s.ReadStream(key)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read back for broadcast: %w", err)
 		}
-		fmt.Printf("[%s] Sent %d bytes to peer: %s\n", s.Transport.Addr(), n, peer.RemoteAddr())
+		defer dataReader.Close()
+
+		// Prepare all peers with stream indicator
+		peerWriters := make([]io.Writer, 0, len(s.peers))
+		for _, peer := range s.peers {
+			peer.Send([]byte{p2p.IncomingStream})
+			peerWriters = append(peerWriters, peer)
+		}
+
+		// Multiwrite to all peers simultaneously
+		if len(peerWriters) > 0 {
+			peerMW := io.MultiWriter(peerWriters...)
+			if _, err := io.Copy(peerMW, dataReader); err != nil {
+				return fmt.Errorf("failed to broadcast to peers: %w", err)
+			}
+		}
 	}
+
 	return nil
-
-	// p := &Payload{
-	// 	Key:  key,
-	// 	Data: buf.Bytes(),
-	// }
-
-	// fmt.Println(buf.Bytes())
-
-	// return s.broadcast(p)
-
 }
 func (s *FileServer) GetPeers() map[string]p2p.Peer {
 	return s.peers
@@ -277,8 +354,12 @@ func (s *FileServer) Start() error {
 }
 
 func (s *FileServer) Stop() error {
-	// send signal to quit the loop
-	close(s.quitChannel)
+	select {
+	case <-s.quitChannel:
+		return nil // already closed
+	default:
+		close(s.quitChannel)
+	}
 	return nil
 }
 

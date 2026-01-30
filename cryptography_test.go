@@ -6,13 +6,13 @@ import (
 	"io"
 	"testing"
 
-	"golang.org/x/crypto/chacha20"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // generateKeyAndNonce creates random key and nonce for testing
 func generateKeyAndNonce() ([]byte, []byte, error) {
-	key := make([]byte, chacha20.KeySize)
-	nonce := make([]byte, chacha20.NonceSize)
+	key := make([]byte, chacha20poly1305.KeySize)
+	nonce := make([]byte, chacha20poly1305.NonceSize)
 	if _, err := rand.Read(key); err != nil {
 		return nil, nil, err
 	}
@@ -38,8 +38,9 @@ func TestCryptoRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
-	if n != int64(len(testData)) {
-		t.Errorf("Encrypted %d bytes, expected %d", n, len(testData))
+	// With AEAD and framing, size will be larger than plaintext
+	if n <= int64(len(testData)) {
+		t.Errorf("Encrypted size %d should be larger than plaintext size %d", n, len(testData))
 	}
 
 	// Verify encrypted data is different from original
@@ -49,12 +50,9 @@ func TestCryptoRoundtrip(t *testing.T) {
 
 	// Decrypt
 	decrypted := new(bytes.Buffer)
-	n, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	_, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
 	if err != nil {
 		t.Fatalf("Failed to decrypt: %v", err)
-	}
-	if n != int64(len(testData)) {
-		t.Errorf("Decrypted %d bytes, expected %d", n, len(testData))
 	}
 
 	// Verify decrypted data matches original
@@ -112,8 +110,8 @@ func TestCryptoLargeData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to encrypt large data: %v", err)
 	}
-	if n != int64(dataSize) {
-		t.Errorf("Encrypted %d bytes, expected %d", n, dataSize)
+	if n <= int64(dataSize) {
+		t.Errorf("Encrypted size %d should be larger than plaintext %d", n, dataSize)
 	}
 
 	// Decrypt
@@ -132,13 +130,13 @@ func TestCryptoLargeData(t *testing.T) {
 	}
 }
 
-// TestCryptoWrongKey tests that decryption with wrong key produces different data
+// TestCryptoWrongKey tests that decryption with wrong key FAILS (AEAD property)
 func TestCryptoWrongKey(t *testing.T) {
 	key1, nonce, err := generateKeyAndNonce()
 	if err != nil {
 		t.Fatalf("Failed to generate key/nonce: %v", err)
 	}
-	key2 := make([]byte, chacha20.KeySize)
+	key2 := make([]byte, chacha20poly1305.KeySize)
 	if _, err := rand.Read(key2); err != nil {
 		t.Fatalf("Failed to generate second key: %v", err)
 	}
@@ -155,19 +153,15 @@ func TestCryptoWrongKey(t *testing.T) {
 	// Decrypt with key2 (wrong key)
 	decrypted := new(bytes.Buffer)
 	_, err = decrypt(key2, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
-	if err != nil {
-		t.Fatalf("Failed to decrypt: %v", err)
-	}
-
-	// Data decrypted with wrong key should NOT match original
-	if bytes.Equal(decrypted.Bytes(), testData) {
-		t.Error("Data decrypted with wrong key should not match original")
+	// WE EXPECT ERROR HERE because AEAD verifies the tag
+	if err == nil {
+		t.Fatal("Decryption with wrong key should fail with AEAD, but it succeeded")
 	}
 }
 
 // TestCryptoStoreIntegration tests the store's encrypted write/read functions
 func TestCryptoStoreIntegration(t *testing.T) {
-	key, nonce, err := generateKeyAndNonce()
+	key, _, err := generateKeyAndNonce() // Nonce from here is unused for WriteStreamEncrypted
 	if err != nil {
 		t.Fatalf("Failed to generate key/nonce: %v", err)
 	}
@@ -178,13 +172,14 @@ func TestCryptoStoreIntegration(t *testing.T) {
 	testData := []byte("Integration test data for encrypted store operations")
 	testKey := "crypto_test_key"
 
-	// Write encrypted
-	n, err := s.WriteStreamEncrypted(key, nonce, testKey, bytes.NewReader(testData))
+	// Write encrypted (Store generates the nonce now)
+	n, err := s.WriteStreamEncrypted(key, testKey, bytes.NewReader(testData))
 	if err != nil {
 		t.Fatalf("WriteStreamEncrypted failed: %v", err)
 	}
-	if n != int64(len(testData)) {
-		t.Errorf("Wrote %d bytes, expected %d", n, len(testData))
+	// Size check: should be plaintext + nonce (12) + framing overhead
+	if n <= int64(len(testData))+12 {
+		t.Errorf("Written size %d too small", n)
 	}
 
 	// Verify file exists
@@ -204,8 +199,8 @@ func TestCryptoStoreIntegration(t *testing.T) {
 		t.Error("Stored encrypted data should differ from plaintext")
 	}
 
-	// Read with decryption
-	_, decryptedReader, err := s.ReadStreamDecrypted(key, nonce, testKey)
+	// Read with decryption (Store reads the nonce from file)
+	_, decryptedReader, err := s.ReadStreamDecrypted(key, testKey)
 	if err != nil {
 		t.Fatalf("ReadStreamDecrypted failed: %v", err)
 	}
