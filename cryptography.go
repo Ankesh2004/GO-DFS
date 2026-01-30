@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -50,6 +51,9 @@ func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 			if err != nil {
 				return totalWritten, err
 			}
+			if nw != len(ciphertext) {
+				return totalWritten, fmt.Errorf("short write: wrote %d bytes, expected %d", nw, len(ciphertext))
+			}
 			totalWritten += int64(4 + nw)
 		}
 		if err == io.EOF {
@@ -83,6 +87,14 @@ func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 			return totalWritten, err
 		}
 
+		// Security: Validate frame length before allocation to prevent memory exhaustion
+		// Max allowed size is maxFrameSize + AEAD overhead
+		maxAllowed := uint32(maxFrameSize + aead.Overhead())
+		if frameLen == 0 || frameLen > maxAllowed {
+			return totalWritten, fmt.Errorf("invalid untrusted frame length: %d (must be 1-%d; maxFrameSize=%d + overhead=%d)",
+				frameLen, maxAllowed, maxFrameSize, aead.Overhead())
+		}
+
 		// Read Ciphertext
 		ciphertext := make([]byte, frameLen)
 		if _, err := io.ReadFull(src, ciphertext); err != nil {
@@ -100,6 +112,9 @@ func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 		nw, err := dst.Write(plaintext)
 		if err != nil {
 			return totalWritten, err
+		}
+		if nw != len(plaintext) {
+			return totalWritten, fmt.Errorf("short write: wrote %d bytes, expected %d", nw, len(plaintext))
 		}
 		totalWritten += int64(nw)
 	}

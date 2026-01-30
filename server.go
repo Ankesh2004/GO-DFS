@@ -245,50 +245,119 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	_, r, err := s.s.ReadStream(key)
 	return r, err
 }
-func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader) error {
-	// 1. Encrypt the data first (User-Side Encryption)
-	// We handle this IN MEMORY for now to support broadcasting multiple times.
-	encryptedBuf := new(bytes.Buffer)
 
+// CountingWriter tracks bytes written
+type CountingWriter struct {
+	w     io.Writer
+	count int64
+}
+
+func (cw *CountingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.count += int64(n)
+	return n, err
+}
+
+func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader) error {
 	// Generate nonce for the user layer
 	userNonce := make([]byte, 12)
 	if _, err := rand.Read(userNonce); err != nil {
 		return err
 	}
-	encryptedBuf.Write(userNonce) // Store nonce at start
 
-	// Encrypt stream
-	if _, err := encrypt(userEncryptionKey, userNonce, r, encryptedBuf); err != nil {
-		return fmt.Errorf("user encryption failed: %w", err)
+	// Create pipe for streaming encryption
+	pr, pw := io.Pipe()
+
+	// Encrypt in background goroutine
+	encryptErr := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+
+		// Write nonce first
+		if _, err := pw.Write(userNonce); err != nil {
+			pw.CloseWithError(err)
+			encryptErr <- err
+			return
+		}
+
+		// Stream encrypt directly to pipe
+		_, err := encrypt(userEncryptionKey, userNonce, r, pw)
+		if err != nil {
+			encryptErr <- fmt.Errorf("user encryption failed: %w", err)
+			pw.CloseWithError(err)
+			return
+		}
+		encryptErr <- nil
+	}()
+
+	// Use the global CountingWriter type
+	counter := &CountingWriter{}
+
+	// Create pipe for storage
+	storagePR, storagePW := io.Pipe()
+	counter.w = storagePW
+
+	// Write to storage in background
+	storageErr := make(chan error, 1)
+	go func() {
+		_, err := s.s.WriteStream(key, storagePR)
+		storageErr <- err
+	}()
+
+	// Copy from encryption pipe through counter to storage
+	_, copyErr := io.Copy(counter, pr)
+	storagePW.Close() // Signal storage write complete
+
+	// Check for encryption errors
+	if err := <-encryptErr; err != nil {
+		return err
 	}
 
-	// The 'size' is the encrypted size
-	encryptedSize := int64(encryptedBuf.Len())
+	// Check for copy errors
+	if copyErr != nil {
+		return fmt.Errorf("streaming to storage failed: %w", copyErr)
+	}
 
-	// 2. Store to Local Disk (as-is, encrypted blob)
-	// We use `WriteStream` to store raw bytes.
-	if _, err := s.s.WriteStream(key, bytes.NewReader(encryptedBuf.Bytes())); err != nil {
+	// Check for storage errors
+	if err := <-storageErr; err != nil {
 		return fmt.Errorf("local storage failed: %w", err)
 	}
 
-	// 3. Broadcast to Peers
+	actualSize := counter.count
+
+	// Broadcast metadata to Peers
 	msg := Message{
 		Payload: MessageStoreFile{
 			Key:  key,
-			Size: encryptedSize, // Encrypted size
+			Size: actualSize,
 		},
 	}
 	if err := s.broadcast(&msg); err != nil {
 		return err
 	}
 
-	// 3.1 Send stream to peers
 	time.Sleep(5 * time.Millisecond) // buffer for decoding
 
-	for _, peer := range s.peers {
-		peer.Send([]byte{p2p.IncomingStream})
-		// Write the encrypted buffer to the peer
-		io.Copy(peer, bytes.NewReader(encryptedBuf.Bytes()))
+	// Read from local storage and multicast to all peers (no RAM buffer!)
+	if len(s.peers) > 0 {
+		_, dataReader, err := s.s.ReadStream(key)
+		if err != nil {
+			return fmt.Errorf("failed to read back for broadcast: %w", err)
+		}
+		defer dataReader.Close()
+
+		// Prepare all peers with stream indicator
+		peerWriters := make([]io.Writer, 0, len(s.peers))
+		for _, peer := range s.peers {
+			peer.Send([]byte{p2p.IncomingStream})
+			peerWriters = append(peerWriters, peer)
+		}
+
+		// Multiwrite to all peers simultaneously
+		if len(peerWriters) > 0 {
+			peerMW := io.MultiWriter(peerWriters...)
+			io.Copy(peerMW, dataReader)
+		}
 	}
 
 	return nil
