@@ -242,7 +242,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 		fmt.Printf("Received file [%s] of [%d] bytes over the network from peer: %s\n", key, n, peer.RemoteAddr().String())
 		peer.CloseStream()
 	}
-	_, r, err := s.s.ReadStreamDecrypted(s.key, key)
+	_, r, err := s.s.ReadStream(key)
 	return r, err
 }
 func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader) error {
