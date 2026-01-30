@@ -29,4 +29,7 @@ cas3000
 cas3001
 cas5000
 cas5001
-.key
+cas7000
+cas7001
+myFiles/
+*.key

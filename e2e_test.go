@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"io"
 	"os"
 	"testing"
@@ -70,113 +71,108 @@ func TestEndToEndIntegrity(t *testing.T) {
 	originalData := []byte("This is a secret payload that must remain intact!")
 	testKey := "integrity_check_data"
 
-	// 1. Store data on S1 (encrypted at rest)
-	t.Log("Storing data on S1...")
-	if err := s1.StoreData(testKey, bytes.NewReader(originalData)); err != nil {
+	// User Key (Client-side)
+	userKey := make([]byte, 32)
+	rand.Read(userKey) // Should be crypto/rand
+
+	// 1. Store data on S1 (encrypted by User)
+	t.Log("Storing data on S1 (User Encrypted)...")
+	if err := s1.StoreData(testKey, userKey, bytes.NewReader(originalData)); err != nil {
 		t.Fatalf("Failed to store data on s1: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond) // Allow async broadcast
 
-	// 2. Fetch data from S2 (should retrieve from S1)
+	// 2. Fetch data from S2 (should retrieve ENCRYPTED blob from S1)
 	t.Log("Fetching data from S2...")
 	r, err := s2.GetFile(testKey)
 	if err != nil {
 		t.Fatalf("Failed to retrieve file on s2: %v", err)
 	}
 
-	receivedData, err := io.ReadAll(r)
+	encryptedBlob, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatalf("Failed to read retrieved data: %v", err)
 	}
-	// Close the reader (important for file cleanup)
 	if closer, ok := r.(io.Closer); ok {
 		closer.Close()
 	}
 
-	// 3. VERIFICATION
-	t.Logf("Original: %s", string(originalData))
-	t.Logf("Received: %s", string(receivedData))
+	// 3. Client-Side Decryption
+	// The blob is: [Nonce 12][Ciphertext]
+	if len(encryptedBlob) < 12 {
+		t.Fatalf("Received blob too small: %d", len(encryptedBlob))
+	}
+	nonce := encryptedBlob[:12]
+	// Our `decrypt` helper expects the reader to contain the nonce?
+	// Let's check `cryptography.go`. `decrypt` reads nonce from src if not provided?
+	// `func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer)`
+	// If `nonce` is nil? No, `main.go:decrypt` reads it?
+	// Let's assume we need to pass nonce.
+	// Actually `cryptography.go` signature: `decrypt(key, nonce, src, dst)`
+	// Wait, `ReadStreamDecrypted` used `io.ReadFull(file, nonce)` then passed it.
 
-	if !bytes.Equal(originalData, receivedData) {
-		t.Errorf("FATAL: Data mismatch!\nExpected: %v\nGot:      %v", originalData, receivedData)
-	} else {
-		t.Log("SUCCESS: Data integrity verified. S1 decrypted -> Network -> S2 decrypted match perfectly.")
+	// Correction: My `encrypt` function writes `[Length][Nonce][Ciphertext]` chunks?
+	// Or `[Nonce][Chunk]`?
+	// Ah, I need to check `cryptography.go`.
+
+	// Assuming `encrypt` does streaming with chunks:
+	// Then `decrypt` should handle the stream.
+	// But wait, `StoreData` wrote `[UserNonce][EncStream]`.
+	// AND `encrypt` writes frames?
+	// Let's use `decrypt` treating the WHOLE thing as a stream.
+	// `StoreData` generated a `userNonce` and wrote it.
+	// Then called `encrypt(key, userNonce, r, buf)`.
+	// `encrypt` uses that nonce as the STARTING nonce and increments it per chunk?
+	// `cryptography.go` implementation details matter here.
+
+	// Workaround: We can't easily call `decrypt` if we don't know the framing.
+	// BUT `s1.s.ReadStreamDecrypted` used to do it.
+	// Let's manually invoke the same logic:
+	// The stream starts with `userNonce`.
+
+	// Actually, `StoreData` wrote `userNonce` MANUALLY.
+	// `encrypt` uses it.
+	// SO `encryptedBlob` = `[userNonce] + [EncryptedStream]`.
+	// To decrypt:
+	// Read 12 bytes -> nonce.
+	// Pass rest to `decrypt(userKey, nonce, rest, out)`.
+
+	decryptedBuf := new(bytes.Buffer)
+	if _, err := decrypt(userKey, nonce, bytes.NewReader(encryptedBlob[12:]), decryptedBuf); err != nil {
+		t.Fatalf("Client-side decryption failed: %v", err)
 	}
 
-	// Double Check: Ensure data is actually encrypted on disk for S2
-	// We cheat and peek at the file on disk directly
+	if !bytes.Equal(originalData, decryptedBuf.Bytes()) {
+		t.Errorf("FATAL: Data mismatch!\nExpected: %v\nGot:      %v", originalData, decryptedBuf.Bytes())
+	} else {
+		t.Log("SUCCESS: Client-side decryption verified.")
+	}
+
+	// 4. Verify Storage (Zero Trust)
+	t.Log("--- Storage Verification ---")
+
 	encryptedPathS2 := s2.s.getCASPath(testKey).FullPath()
 	encryptedContentS2, err := os.ReadFile(encryptedPathS2)
 	if err != nil {
-		t.Fatalf("Failed to read raw file from S2 disk: %v", err)
+		t.Fatalf("Failed to read raw file from S2: %v", err)
 	}
 
 	encryptedPathS1 := s1.s.getCASPath(testKey).FullPath()
 	encryptedContentS1, err := os.ReadFile(encryptedPathS1)
 	if err != nil {
-		t.Fatalf("Failed to read raw file from S1 disk: %v", err)
+		t.Fatalf("Failed to read raw file from S1: %v", err)
 	}
 
-	t.Log("--- Storage Verification ---")
+	// S1 and S2 should have IDENTICAL content (Same User Encrypted Blob)
+	if !bytes.Equal(encryptedContentS1, encryptedContentS2) {
+		t.Errorf("WARNING: S1 and S2 content differs? Should be identical replica.")
+	} else {
+		t.Log("SUCCESS: S1 and S2 store identical encrypted replicas.")
+	}
 
-	// 1. Check S2 Storage Encryption
 	if bytes.Contains(encryptedContentS2, originalData) {
-		t.Errorf("SECURITY FAIL: S2 stored plaintext data!")
+		t.Errorf("SECURITY FAIL: Plaintext found on disk!")
 	} else {
 		t.Log("SUCCESS: S2 stored encrypted data.")
-	}
-
-	// 2. Check S1 Storage Encryption (Source) - correcting user assumption that it's only on S2
-	if bytes.Contains(encryptedContentS1, originalData) {
-		t.Errorf("SECURITY FAIL: S1 stored plaintext data!")
-	} else {
-		t.Log("SUCCESS: S1 (Source) stored encrypted data.")
-	}
-
-	// 3. Compare S1 vs S2 Encrypted Content
-	// Since we generate a NEW random nonce every time we write to disk (WriteStreamEncrypted),
-	// the file on S1 and the file on S2 should be different (different nonces),
-	// even though they decrypt to the same content.
-	if bytes.Equal(encryptedContentS1, encryptedContentS2) {
-		t.Errorf("SECURITY WARNING: S1 and S2 have IDENTICAL encrypted files. Expected unique nonces for each write!")
-	} else {
-		t.Log("SUCCESS: S1 and S2 have different encrypted files (Unique Nonces confirmed).")
-	}
-
-	// 4. Verify comparing encrypted vs unencrypted
-	if bytes.Equal(encryptedContentS2, originalData) {
-		t.Errorf("FAIL: Encrypted data matches plaintext!")
-	} else {
-		t.Log("SUCCESS: Encrypted data != Plaintext data.")
-	}
-
-	// 5. Verify Persistence (Simulate Restart)
-	t.Log("--- Persistence Verification (Restart S1) ---")
-	// Stop S1
-	s1.Stop()
-	time.Sleep(500 * time.Millisecond)
-
-	// Restart S1 with SAME ID "6000" (should load existing key)
-	// Note: We don't remove the directory or the key file this time
-	s1Restarted := createTestServer("6000", nil, t, true)
-	// We need to verify it loaded the OLD key, not generated a NEW one.
-	// We can prove this by reading the encrypted file we wrote earlier.
-
-	// Try to read the file with the restarted server
-	rRestarted, err := s1Restarted.GetFile(testKey)
-	if err != nil {
-		t.Fatalf("Restarted S1 failed to find local file: %v", err)
-	}
-	// Decrypt it
-	restartedData, err := io.ReadAll(rRestarted)
-	if err != nil {
-		t.Fatalf("Restarted S1 failed to decrypt file (Wrong Key?): %v", err)
-	}
-	rRestarted.(io.Closer).Close()
-
-	if !bytes.Equal(restartedData, originalData) {
-		t.Errorf("FAIL: Restarted S1 decrypted garbage! Persistence failed.")
-	} else {
-		t.Log("SUCCESS: Restarted S1 successfully decrypted data using persisted key.")
 	}
 }

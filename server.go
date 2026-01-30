@@ -106,7 +106,8 @@ func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) e
 		return nil
 	}
 	fmt.Printf("%+v\n", msg)
-	n, err := s.s.WriteStreamEncrypted(s.key, msg.Key, io.LimitReader(peer, msg.Size))
+	// Zero Trust: Store the RAW encrypted blob received from user (via peer). Do not re-encrypt.
+	n, err := s.s.WriteStream(msg.Key, io.LimitReader(peer, msg.Size))
 	if err != nil {
 		return err
 	}
@@ -120,7 +121,10 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 		return fmt.Errorf("Need to serve %s to peer %s, but file not found in local disk of [%s]", msg.Key, from, s.Transport.Addr())
 	}
 	fmt.Printf("[%s] serving file over network to [%s]\n", s.Transport.Addr(), from)
-	fileSize, r, err := s.s.ReadStreamDecrypted(s.key, msg.Key)
+
+	// Zero Trust: Read RAW encrypted blob to send to peer. Do not attempt to decrypt.
+	// Note: ReadStream returns (size, reader, error)
+	fileSize, r, err := s.s.ReadStream(msg.Key)
 	if err != nil {
 		return err
 	}
@@ -207,7 +211,9 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	// check in local storage first
 	if s.s.Has(key) {
 		fmt.Printf("[%s] Serving file [%s] from local disk of [%s]", s.Transport.Addr(), key, s.Transport.Addr())
-		_, r, err := s.s.ReadStreamDecrypted(s.key, key)
+		// When retrieving a file that was stored with user encryption, we should read it
+		// as a raw stream, not decrypt it with the node's key.
+		_, r, err := s.s.ReadStream(key)
 		return r, err
 	}
 	// fetch from the peers in the network
@@ -226,7 +232,9 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 		var filesize int64
 		binary.Read(peer, binary.LittleEndian, &filesize)
 
-		n, err := s.s.WriteStreamEncrypted(s.key, key, io.LimitReader(peer, filesize))
+		// When receiving a file that was stored with user encryption, we should write it
+		// as a raw stream, not encrypt it with the node's key.
+		n, err := s.s.WriteStream(key, io.LimitReader(peer, filesize))
 		if err != nil {
 			fmt.Printf("Error writing file to peer %s: %v\n", peer.RemoteAddr().String(), err)
 			continue
@@ -237,53 +245,53 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	_, r, err := s.s.ReadStreamDecrypted(s.key, key)
 	return r, err
 }
-func (s *FileServer) StoreData(key string, r io.Reader) error {
-	// 1. write to local storage
-	// 2. send to all known peers
+func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader) error {
+	// 1. Encrypt the data first (User-Side Encryption)
+	// We handle this IN MEMORY for now to support broadcasting multiple times.
+	encryptedBuf := new(bytes.Buffer)
 
-	fileBuffer := new(bytes.Buffer)
-	tee := io.TeeReader(r, fileBuffer) // tee reads from reader r and writes to fileBuffer too
-	// because if we directly write to local then reader will become empty , so we need to store in fileBuffer
-	// also so that it can be broadcasted later
-	n, err := s.s.WriteStreamEncrypted(s.key, key, tee)
-	if err != nil {
+	// Generate nonce for the user layer
+	userNonce := make([]byte, 12)
+	if _, err := rand.Read(userNonce); err != nil {
 		return err
 	}
-	// 2.1 first a msg is sent
+	encryptedBuf.Write(userNonce) // Store nonce at start
+
+	// Encrypt stream
+	if _, err := encrypt(userEncryptionKey, userNonce, r, encryptedBuf); err != nil {
+		return fmt.Errorf("user encryption failed: %w", err)
+	}
+
+	// The 'size' is the encrypted size
+	encryptedSize := int64(encryptedBuf.Len())
+
+	// 2. Store to Local Disk (as-is, encrypted blob)
+	// We use `WriteStream` to store raw bytes.
+	if _, err := s.s.WriteStream(key, bytes.NewReader(encryptedBuf.Bytes())); err != nil {
+		return fmt.Errorf("local storage failed: %w", err)
+	}
+
+	// 3. Broadcast to Peers
 	msg := Message{
 		Payload: MessageStoreFile{
 			Key:  key,
-			Size: n,
+			Size: encryptedSize, // Encrypted size
 		},
 	}
 	if err := s.broadcast(&msg); err != nil {
 		return err
 	}
 
-	//2.2 now we will send the actual file
-	time.Sleep(5 * time.Millisecond)
-	// TODO: use multiwriter
+	// 3.1 Send stream to peers
+	time.Sleep(5 * time.Millisecond) // buffer for decoding
 
 	for _, peer := range s.peers {
 		peer.Send([]byte{p2p.IncomingStream})
-		// creating a new reader for each peer to avoid reader exhaustion
-		n, err := io.Copy(peer, bytes.NewReader(fileBuffer.Bytes()))
-		if err != nil {
-			return err
-		}
-		fmt.Printf("[%s] Sent %d bytes to peer: %s\n", s.Transport.Addr(), n, peer.RemoteAddr())
+		// Write the encrypted buffer to the peer
+		io.Copy(peer, bytes.NewReader(encryptedBuf.Bytes()))
 	}
+
 	return nil
-
-	// p := &Payload{
-	// 	Key:  key,
-	// 	Data: buf.Bytes(),
-	// }
-
-	// fmt.Println(buf.Bytes())
-
-	// return s.broadcast(p)
-
 }
 func (s *FileServer) GetPeers() map[string]p2p.Peer {
 	return s.peers
