@@ -159,9 +159,9 @@ func TestCryptoWrongKey(t *testing.T) {
 	}
 }
 
-// TestCryptoStoreIntegration tests the store's encrypted write/read functions
+// TestCryptoStoreIntegration tests the store's ability to handle encrypted blobs correctly
 func TestCryptoStoreIntegration(t *testing.T) {
-	key, _, err := generateKeyAndNonce() // Nonce from here is unused for WriteStreamEncrypted
+	key, nonce, err := generateKeyAndNonce()
 	if err != nil {
 		t.Fatalf("Failed to generate key/nonce: %v", err)
 	}
@@ -172,48 +172,55 @@ func TestCryptoStoreIntegration(t *testing.T) {
 	testData := []byte("Integration test data for encrypted store operations")
 	testKey := "crypto_test_key"
 
-	// Write encrypted (Store generates the nonce now)
-	n, err := s.WriteStreamEncrypted(key, testKey, bytes.NewReader(testData))
+	// 1. Manually Encrypt
+	encBuffer := new(bytes.Buffer)
+	// User layer protocol: Nonce followed by ciphertext
+	encBuffer.Write(nonce)
+	_, err = encrypt(key, nonce, bytes.NewReader(testData), encBuffer)
 	if err != nil {
-		t.Fatalf("WriteStreamEncrypted failed: %v", err)
+		t.Fatalf("Manual encryption failed: %v", err)
 	}
-	// Size check: should be plaintext + nonce (12) + framing overhead
+
+	// 2. Write raw encrypted blob to store
+	n, err := s.WriteStream(testKey, encBuffer)
+	if err != nil {
+		t.Fatalf("WriteStream failed: %v", err)
+	}
 	if n <= int64(len(testData))+12 {
 		t.Errorf("Written size %d too small", n)
 	}
 
-	// Verify file exists
+	// 3. Verify file exists
 	if !s.Has(testKey) {
-		t.Fatal("File should exist after WriteStreamEncrypted")
+		t.Fatal("File should exist after WriteStream")
 	}
 
-	// Read encrypted data without decryption and verify it's different
+	// 4. Read back and manually decrypt
 	_, rawReader, err := s.ReadStream(testKey)
 	if err != nil {
 		t.Fatalf("ReadStream failed: %v", err)
 	}
-	rawData, _ := io.ReadAll(rawReader)
-	rawReader.Close()
+	defer rawReader.Close()
 
-	if bytes.Equal(rawData, testData) {
-		t.Error("Stored encrypted data should differ from plaintext")
-	}
-
-	// Read with decryption (Store reads the nonce from file)
-	_, decryptedReader, err := s.ReadStreamDecrypted(key, testKey)
+	downloadedBlob, err := io.ReadAll(rawReader)
 	if err != nil {
-		t.Fatalf("ReadStreamDecrypted failed: %v", err)
+		t.Fatalf("Read downloaded blob failed: %v", err)
 	}
-	decryptedData, err := io.ReadAll(decryptedReader)
-	if err != nil {
-		t.Fatalf("Failed to read decrypted data: %v", err)
-	}
-	decryptedReader.Close()
 
-	// Verify decrypted data matches original
-	if !bytes.Equal(decryptedData, testData) {
+	if len(downloadedBlob) < 12 {
+		t.Fatalf("Downloaded blob too small: %d", len(downloadedBlob))
+	}
+
+	downloadedNonce := downloadedBlob[:12]
+	decrypted := new(bytes.Buffer)
+	_, err = decrypt(key, downloadedNonce, bytes.NewReader(downloadedBlob[12:]), decrypted)
+	if err != nil {
+		t.Fatalf("Manual decryption failed: %v", err)
+	}
+
+	if !bytes.Equal(decrypted.Bytes(), testData) {
 		t.Errorf("Decrypted data doesn't match.\nGot: %s\nExpected: %s",
-			string(decryptedData), string(testData))
+			decrypted.String(), string(testData))
 	}
 }
 

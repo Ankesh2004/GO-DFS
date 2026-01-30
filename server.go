@@ -13,11 +13,6 @@ import (
 	"github.com/Ankesh2004/GO-DFS/p2p"
 )
 
-type Payload struct {
-	Key  string
-	Data []byte
-}
-
 type FileServerOptions struct {
 	ID      string
 	rootDir string
@@ -110,8 +105,13 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 }
 
 func (s *FileServer) bootstrapNetwork() {
+	if len(s.BooststrapNodes) == 0 {
+		return
+	}
 	for _, addr := range s.BooststrapNodes {
-		// dial each node
+		if len(addr) == 0 {
+			continue
+		}
 		fmt.Println("Dailing node: ", addr)
 		go func(addr string) {
 			if err := s.Transport.Dial(addr); err != nil {
@@ -120,27 +120,6 @@ func (s *FileServer) bootstrapNetwork() {
 			}
 		}(addr)
 	}
-}
-func (s *FileServer) stream(p *Payload) error {
-	peers := []io.Writer{}
-	for _, peer := range s.peers {
-		peers = append(peers, peer)
-	}
-	if len(peers) == 0 {
-		fmt.Printf("No peers to broadcast to (total registered: %d)\n", len(s.peers))
-		return nil
-	}
-	mw := io.MultiWriter(peers...)
-	payloadBytes, err := encodePayload(p)
-	if err != nil {
-		return err
-	}
-	rpc := p2p.RPC{
-		Payload: payloadBytes,
-		From:    s.Transport.Addr(),
-	}
-	// encode and send for SECURITY PURPOSES
-	return gob.NewEncoder(mw).Encode(rpc)
 }
 
 func (s *FileServer) broadcast(msg *Message) error {
@@ -397,18 +376,4 @@ func (s *FileServer) loop() {
 			return
 		}
 	}
-}
-
-func encodePayload(p *Payload) ([]byte, error) {
-	var buf bytes.Buffer
-	err := gob.NewEncoder(&buf).Encode(p)
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func init() {
-	gob.Register(MessageStoreFile{})
-	gob.Register(MessageGetFile{})
 }
