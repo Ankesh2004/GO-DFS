@@ -198,9 +198,15 @@ func (s *FileServer) broadcast(msg *Message) error {
 	if err := gob.NewEncoder(buf).Encode(msg); err != nil {
 		return err
 	}
+	msgBytes := buf.Bytes()
+	msgLen := uint32(len(msgBytes))
+
 	for _, peer := range s.peers {
 		peer.Send([]byte{p2p.IncomingMessage})
-		if err := peer.Send(buf.Bytes()); err != nil {
+		if err := binary.Write(peer, binary.LittleEndian, msgLen); err != nil {
+			return err
+		}
+		if err := peer.Send(msgBytes); err != nil {
 			fmt.Printf("Error sending message to peer %s: %v\n", peer.LocalAddr().String(), err)
 			continue
 		}
@@ -297,7 +303,7 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 	storagePR, storagePW := io.Pipe()
 	counter.w = storagePW
 
-	// Write to storage in background
+	// Writijg to storage in background
 	storageErr := make(chan error, 1)
 	go func() {
 		_, err := s.s.WriteStream(key, storagePR)
@@ -308,17 +314,14 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 	_, copyErr := io.Copy(counter, pr)
 	storagePW.Close() // Signal storage write complete
 
-	// Check for encryption errors
 	if err := <-encryptErr; err != nil {
 		return err
 	}
 
-	// Check for copy errors
 	if copyErr != nil {
 		return fmt.Errorf("streaming to storage failed: %w", copyErr)
 	}
 
-	// Check for storage errors
 	if err := <-storageErr; err != nil {
 		return fmt.Errorf("local storage failed: %w", err)
 	}
@@ -336,9 +339,9 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 		return err
 	}
 
-	time.Sleep(5 * time.Millisecond) // buffer for decoding
+	// No sleep needed anymore due to framed message protocol
 
-	// Read from local storage and multicast to all peers (no RAM buffer!)
+	// Read from local storage and multicast to all peers (no RAM buffer! but increase one disk read ;())
 	if len(s.peers) > 0 {
 		_, dataReader, err := s.s.ReadStream(key)
 		if err != nil {
