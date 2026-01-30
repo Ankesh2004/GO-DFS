@@ -7,6 +7,8 @@ import (
 	"io"
 )
 
+const MaxMessageSize = 1024 * 1024 // 1MB maximum for metadata messages
+
 type Decoder interface {
 	Decode(io.Reader, *RPC) error
 }
@@ -45,9 +47,14 @@ func (d SampleDecoder) Decode(r io.Reader, rpc *RPC) error {
 		return fmt.Errorf("failed to read message length: %w", err)
 	}
 
-	rpc.Payload = make([]byte, length)
+	// Security: Validate message length to prevent memory exhaustion attacks
+	if length == 0 || length > MaxMessageSize {
+		return fmt.Errorf("invalid message length: %d (must be between 1 and %d bytes)", length, MaxMessageSize)
+	}
+
+	rpc.Payload = make([]byte, int(length))
 	if _, err := io.ReadFull(r, rpc.Payload); err != nil {
-		return fmt.Errorf("failed to read message payload: %w", err)
+		return fmt.Errorf("failed to read message payload (%d bytes): %w", length, err)
 	}
 
 	return nil

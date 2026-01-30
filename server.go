@@ -265,7 +265,7 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 	storagePR, storagePW := io.Pipe()
 	counter.w = storagePW
 
-	// Writing to storage in background
+	// Writijg to storage in background
 	storageErr := make(chan error, 1)
 	go func() {
 		defer storagePR.Close() // Ensure reader closes to unblock writer
