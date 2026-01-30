@@ -7,12 +7,10 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/p2p"
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
 type Payload struct {
@@ -36,9 +34,6 @@ type FileServer struct {
 
 	peers     map[string]p2p.Peer
 	peersLock sync.Mutex
-
-	// for encryption
-	key []byte
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
@@ -46,46 +41,12 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		options.rootDir,
 	)
 
-	key, err := loadOrGenerateKey(options.ID)
-	if err != nil {
-		panic(fmt.Sprintf("failed to load/generate key: %v", err))
-	}
-
 	return &FileServer{
 		FileServerOptions: options,
 		s:                 store,
 		quitChannel:       make(chan struct{}),
 		peers:             make(map[string]p2p.Peer),
-		key:               key,
 	}
-}
-
-func loadOrGenerateKey(id string) ([]byte, error) {
-	keyPath := fmt.Sprintf("%s.key", id)
-	// 1. Try to load
-	if _, err := os.Stat(keyPath); err == nil {
-		key, err := os.ReadFile(keyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read key file: %w", err)
-		}
-		if len(key) != chacha20poly1305.KeySize {
-			return nil, fmt.Errorf("key file is corrupted (size %d)", len(key))
-		}
-		return key, nil
-	}
-
-	// 2. Generate new
-	key := make([]byte, chacha20poly1305.KeySize)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-
-	// 3. Save for persistence
-	if err := os.WriteFile(keyPath, key, 0600); err != nil {
-		return nil, fmt.Errorf("failed to save key file: %w", err)
-	}
-	fmt.Printf("[%s] Generated and saved new encryption key to %s\n", id, keyPath)
-	return key, nil
 }
 
 func (s *FileServer) handleMessage(from string, msg *Message) error {
@@ -218,7 +179,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	if s.s.Has(key) {
 		fmt.Printf("[%s] Serving file [%s] from local disk of [%s]", s.Transport.Addr(), key, s.Transport.Addr())
 		// When retrieving a file that was stored with user encryption, we should read it
-		// as a raw stream, not decrypt it with the node's key.
+		// as a raw stream. The node does not hold any keys to decrypt it.
 		_, r, err := s.s.ReadStream(key)
 		return r, err
 	}
@@ -239,7 +200,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 		binary.Read(peer, binary.LittleEndian, &filesize)
 
 		// When receiving a file that was stored with user encryption, we should write it
-		// as a raw stream, not encrypt it with the node's key.
+		// as a raw stream. The node does not hold any keys to decrypt or re-encrypt it.
 		n, err := s.s.WriteStream(key, io.LimitReader(peer, filesize))
 		if err != nil {
 			fmt.Printf("Error writing file to peer %s: %v\n", peer.RemoteAddr().String(), err)
