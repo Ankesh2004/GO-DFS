@@ -47,7 +47,7 @@ func (d SampleDecoder) Decode(r io.Reader, rpc *RPC) error {
 		return fmt.Errorf("failed to read message length: %w", err)
 	}
 
-	// Security: Validate message length to prevent memory exhaustion attacks
+	// Security: Validate message length to prevent memory exhaustion attacks (DoS)
 	if length == 0 || length > MaxMessageSize {
 		return fmt.Errorf("invalid message length: %d (must be between 1 and %d bytes)", length, MaxMessageSize)
 	}

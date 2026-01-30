@@ -143,17 +143,6 @@ func (s *FileServer) stream(p *Payload) error {
 	return gob.NewEncoder(mw).Encode(rpc)
 }
 
-type Message struct {
-	Payload any
-}
-type MessageStoreFile struct {
-	Key  string
-	Size int64
-}
-type MessageGetFile struct {
-	Key string
-}
-
 func (s *FileServer) broadcast(msg *Message) error {
 	buf := new(bytes.Buffer)
 	if err := gob.NewEncoder(buf).Encode(msg); err != nil {
