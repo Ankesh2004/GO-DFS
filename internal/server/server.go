@@ -12,6 +12,7 @@ import (
 
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
+	"github.com/Ankesh2004/GO-DFS/pkg/dht"
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
 )
 
@@ -25,6 +26,8 @@ type FileServerOptions struct {
 type FileServer struct {
 	FileServerOptions
 
+	ID          dht.ID
+	DHT         *dht.Kademlia
 	Store       *storage.Store
 	quitChannel chan struct{}
 
@@ -34,9 +37,12 @@ type FileServer struct {
 
 func NewFileServer(options FileServerOptions) *FileServer {
 	store := storage.NewStore(options.RootDir)
+	id := dht.NewID(options.ID)
 
 	return &FileServer{
 		FileServerOptions: options,
+		ID:                id,
+		DHT:               dht.NewKademlia(id),
 		Store:             store,
 		quitChannel:       make(chan struct{}),
 		peers:             make(map[string]p2p.Peer),
@@ -129,13 +135,46 @@ func (s *FileServer) broadcast(msg *Message) error {
 	msgBytes := buf.Bytes()
 	msgLen := uint32(len(msgBytes))
 
-	for _, peer := range s.peers {
+	// If it's a store message, we only send to the closest nodes in our DHT
+	// This prevents network saturation
+	var targetPeers []p2p.Peer
+
+	if storeMsg, ok := msg.Payload.(MessageStoreFile); ok {
+		targetID := dht.NewID(storeMsg.Key)
+		closest := s.DHT.NearestNodes(targetID, dht.K)
+
+		s.peersLock.Lock()
+		for _, node := range closest {
+			if p, ok := s.peers[node.Addr]; ok {
+				targetPeers = append(targetPeers, p)
+			}
+		}
+		s.peersLock.Unlock()
+
+		// If we don't have enough specific peers yet, fall back to all known peers
+		if len(targetPeers) == 0 {
+			s.peersLock.Lock()
+			for _, p := range s.peers {
+				targetPeers = append(targetPeers, p)
+			}
+			s.peersLock.Unlock()
+		}
+	} else {
+		// For other messages (e.g. discovery or search), broadcast to all known peers
+		s.peersLock.Lock()
+		for _, p := range s.peers {
+			targetPeers = append(targetPeers, p)
+		}
+		s.peersLock.Unlock()
+	}
+
+	for _, peer := range targetPeers {
 		peer.Send([]byte{p2p.IncomingMessage})
 		if err := binary.Write(peer, binary.LittleEndian, msgLen); err != nil {
 			return err
 		}
 		if err := peer.Send(msgBytes); err != nil {
-			fmt.Printf("Error sending message to peer %s: %v\n", peer.LocalAddr().String(), err)
+			fmt.Printf("Error sending message to peer %s: %v\n", peer.RemoteAddr().String(), err)
 			continue
 		}
 	}
@@ -309,8 +348,16 @@ func (s *FileServer) Stop() error {
 func (s *FileServer) OnPeer(P p2p.Peer) error {
 	s.peersLock.Lock()
 	defer s.peersLock.Unlock()
-	s.peers[P.RemoteAddr().String()] = P
-	fmt.Printf("[%s] New peer joined in: %s\n", s.Transport.Addr(), P.RemoteAddr().String())
+
+	peerAddr := P.RemoteAddr().String()
+	s.peers[peerAddr] = P
+
+	// Add to DHT Routing Table
+	// For now we use the hash of the address as the ID since we don't exchange IDs yet
+	peerID := dht.NewID(peerAddr)
+	s.DHT.Update(peerID, peerAddr)
+
+	fmt.Printf("[%s] New peer joined: %s (ID: %s)\n", s.Transport.Addr(), peerAddr, peerID.String()[:8])
 	return nil
 }
 
