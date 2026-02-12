@@ -1,4 +1,4 @@
-package main
+package crypto
 
 import (
 	"encoding/binary"
@@ -11,16 +11,16 @@ import (
 // FOR TESTING : WE ARE CURRENTLY HAVING KEY ON SERVER , LATER DO AN KEY MGMT SERVICE OR SOMETHING (TODO)
 
 const (
-	nonceSize    = 12
-	maxFrameSize = 32 * 1024 // 32KB chunks
+	NonceSize    = 12
+	MaxFrameSize = 32 * 1024 // 32KB chunks
 )
 
-// encrypt uses ChaCha20-Poly1305 to encrypt data from src to dst.
+// Encrypt uses ChaCha20-Poly1305 to encrypt data from src to dst.
 // It uses a chunked format: [4-byte length][ciphertext + tag].
 // It increments the nonce for each chunk.
-func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
-	if len(nonce) != nonceSize {
-		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", nonceSize, len(nonce))
+func Encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
+	if len(nonce) != NonceSize {
+		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", NonceSize, len(nonce))
 	}
 
 	aead, err := chacha20poly1305.New(key)
@@ -29,10 +29,10 @@ func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 	}
 
 	// Make a copy of nonce so we can increment it without affecting caller
-	currentNonce := make([]byte, nonceSize)
+	currentNonce := make([]byte, NonceSize)
 	copy(currentNonce, nonce)
 
-	buf := make([]byte, maxFrameSize)
+	buf := make([]byte, MaxFrameSize)
 	var totalWritten int64 = 0
 
 	for {
@@ -70,9 +70,9 @@ func encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 	return totalWritten, nil
 }
 
-func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
-	if len(nonce) != nonceSize {
-		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", nonceSize, len(nonce))
+func Decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, error) {
+	if len(nonce) != NonceSize {
+		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", NonceSize, len(nonce))
 	}
 
 	aead, err := chacha20poly1305.New(key)
@@ -80,7 +80,7 @@ func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 		return 0, err
 	}
 
-	currentNonce := make([]byte, nonceSize)
+	currentNonce := make([]byte, NonceSize)
 	copy(currentNonce, nonce)
 
 	var totalWritten int64 = 0
@@ -96,11 +96,11 @@ func decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 		}
 
 		// Security: Validate frame length before allocation to prevent memory exhaustion
-		// Max allowed size is maxFrameSize + AEAD overhead
-		maxAllowed := uint32(maxFrameSize + aead.Overhead())
+		// Max allowed size is MaxFrameSize + AEAD overhead
+		maxAllowed := uint32(MaxFrameSize + aead.Overhead())
 		if frameLen == 0 || frameLen > maxAllowed {
 			return totalWritten, fmt.Errorf("invalid untrusted frame length: %d (must be 1-%d; maxFrameSize=%d + overhead=%d)",
-				frameLen, maxAllowed, maxFrameSize, aead.Overhead())
+				frameLen, maxAllowed, MaxFrameSize, aead.Overhead())
 		}
 
 		// Read Ciphertext

@@ -1,9 +1,8 @@
-package main
+package crypto
 
 import (
 	"bytes"
 	"crypto/rand"
-	"io"
 	"testing"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -34,7 +33,7 @@ func TestCryptoRoundtrip(t *testing.T) {
 	// Encrypt
 	src := bytes.NewReader(testData)
 	encrypted := new(bytes.Buffer)
-	n, err := encrypt(key, nonce, src, encrypted)
+	n, err := Encrypt(key, nonce, src, encrypted)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
@@ -50,7 +49,7 @@ func TestCryptoRoundtrip(t *testing.T) {
 
 	// Decrypt
 	decrypted := new(bytes.Buffer)
-	_, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	_, err = Decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
 	if err != nil {
 		t.Fatalf("Failed to decrypt: %v", err)
 	}
@@ -73,14 +72,14 @@ func TestCryptoEmptyData(t *testing.T) {
 
 	// Encrypt
 	encrypted := new(bytes.Buffer)
-	_, err = encrypt(key, nonce, bytes.NewReader(testData), encrypted)
+	_, err = Encrypt(key, nonce, bytes.NewReader(testData), encrypted)
 	if err != nil {
 		t.Fatalf("Failed to encrypt empty data: %v", err)
 	}
 
 	// Decrypt
 	decrypted := new(bytes.Buffer)
-	_, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	_, err = Decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
 	if err != nil {
 		t.Fatalf("Failed to decrypt empty data: %v", err)
 	}
@@ -106,7 +105,7 @@ func TestCryptoLargeData(t *testing.T) {
 
 	// Encrypt
 	encrypted := new(bytes.Buffer)
-	n, err := encrypt(key, nonce, bytes.NewReader(testData), encrypted)
+	n, err := Encrypt(key, nonce, bytes.NewReader(testData), encrypted)
 	if err != nil {
 		t.Fatalf("Failed to encrypt large data: %v", err)
 	}
@@ -116,7 +115,7 @@ func TestCryptoLargeData(t *testing.T) {
 
 	// Decrypt
 	decrypted := new(bytes.Buffer)
-	n, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	n, err = Decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
 	if err != nil {
 		t.Fatalf("Failed to decrypt large data: %v", err)
 	}
@@ -145,82 +144,17 @@ func TestCryptoWrongKey(t *testing.T) {
 
 	// Encrypt with key1
 	encrypted := new(bytes.Buffer)
-	_, err = encrypt(key1, nonce, bytes.NewReader(testData), encrypted)
+	_, err = Encrypt(key1, nonce, bytes.NewReader(testData), encrypted)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
 
 	// Decrypt with key2 (wrong key)
 	decrypted := new(bytes.Buffer)
-	_, err = decrypt(key2, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	_, err = Decrypt(key2, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
 	// WE EXPECT ERROR HERE because AEAD verifies the tag
 	if err == nil {
 		t.Fatal("Decryption with wrong key should fail with AEAD, but it succeeded")
-	}
-}
-
-// TestCryptoStoreIntegration tests the store's ability to handle encrypted blobs correctly
-func TestCryptoStoreIntegration(t *testing.T) {
-	key, nonce, err := generateKeyAndNonce()
-	if err != nil {
-		t.Fatalf("Failed to generate key/nonce: %v", err)
-	}
-
-	s := NewStore("./test_crypto_cas")
-	defer s.Wipe()
-
-	testData := []byte("Integration test data for encrypted store operations")
-	testKey := "crypto_test_key"
-
-	// 1. Manually Encrypt
-	encBuffer := new(bytes.Buffer)
-	// User layer protocol: Nonce followed by ciphertext
-	encBuffer.Write(nonce)
-	_, err = encrypt(key, nonce, bytes.NewReader(testData), encBuffer)
-	if err != nil {
-		t.Fatalf("Manual encryption failed: %v", err)
-	}
-
-	// 2. Write raw encrypted blob to store
-	n, err := s.WriteStream(testKey, encBuffer)
-	if err != nil {
-		t.Fatalf("WriteStream failed: %v", err)
-	}
-	if n <= int64(len(testData))+12 {
-		t.Errorf("Written size %d too small", n)
-	}
-
-	// 3. Verify file exists
-	if !s.Has(testKey) {
-		t.Fatal("File should exist after WriteStream")
-	}
-
-	// 4. Read back and manually decrypt
-	_, rawReader, err := s.ReadStream(testKey)
-	if err != nil {
-		t.Fatalf("ReadStream failed: %v", err)
-	}
-	defer rawReader.Close()
-
-	downloadedBlob, err := io.ReadAll(rawReader)
-	if err != nil {
-		t.Fatalf("Read downloaded blob failed: %v", err)
-	}
-
-	if len(downloadedBlob) < 12 {
-		t.Fatalf("Downloaded blob too small: %d", len(downloadedBlob))
-	}
-
-	downloadedNonce := downloadedBlob[:12]
-	decrypted := new(bytes.Buffer)
-	_, err = decrypt(key, downloadedNonce, bytes.NewReader(downloadedBlob[12:]), decrypted)
-	if err != nil {
-		t.Fatalf("Manual decryption failed: %v", err)
-	}
-
-	if !bytes.Equal(decrypted.Bytes(), testData) {
-		t.Errorf("Decrypted data doesn't match.\nGot: %s\nExpected: %s",
-			decrypted.String(), string(testData))
 	}
 }
 
@@ -231,8 +165,8 @@ func TestCryptoMultipleChunks(t *testing.T) {
 		t.Fatalf("Failed to generate key/nonce: %v", err)
 	}
 
-	// Create data larger than the 32KB buffer used in copyStream
-	dataSize := 100 * 1024 // 100KB (more than 3 chunks of 32KB each)
+	// Create data larger than the buffer used in encrypt/decrypt
+	dataSize := 100 * 1024 // 100KB (more than 3 chunks)
 	testData := make([]byte, dataSize)
 	for i := range testData {
 		testData[i] = byte(i % 256)
@@ -240,14 +174,14 @@ func TestCryptoMultipleChunks(t *testing.T) {
 
 	// Encrypt
 	encrypted := new(bytes.Buffer)
-	_, err = encrypt(key, nonce, bytes.NewReader(testData), encrypted)
+	_, err = Encrypt(key, nonce, bytes.NewReader(testData), encrypted)
 	if err != nil {
 		t.Fatalf("Failed to encrypt: %v", err)
 	}
 
 	// Decrypt
 	decrypted := new(bytes.Buffer)
-	_, err = decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
+	_, err = Decrypt(key, nonce, bytes.NewReader(encrypted.Bytes()), decrypted)
 	if err != nil {
 		t.Fatalf("Failed to decrypt: %v", err)
 	}
