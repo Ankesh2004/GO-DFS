@@ -38,6 +38,32 @@ func loadOrGenerateUserKey(filename string) ([]byte, error) {
 	return key, nil
 }
 
+func loadOrGenerateNodeID(dataDir string) (string, error) {
+	idPath := filepath.Join(dataDir, "node.id")
+	if _, err := os.Stat(idPath); err == nil {
+		id, err := os.ReadFile(idPath)
+		if err != nil {
+			return "", err
+		}
+		return string(id), nil
+	}
+
+	// Generate a random ID (16 bytes hex = 32 chars)
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	id := fmt.Sprintf("%x", b)
+
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(idPath, []byte(id), 0644); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error {
 	fmt.Printf(">>> Retrieving file: %s\n", key)
 
@@ -114,15 +140,22 @@ func runNode(port, bootstrap, advertise, dataDir, nodeID string, relay bool) {
 		}
 	}
 
-	if nodeID == "" {
-		nodeID = advertise
-	}
-
 	if dataDir == "" {
 		// Extract port number for directory name
 		parts := strings.Split(port, ":")
 		suffix := parts[len(parts)-1]
 		dataDir = "./cas_" + suffix
+	}
+
+	if nodeID == "" {
+		var err error
+		nodeID, err = loadOrGenerateNodeID(dataDir)
+		if err != nil {
+			fmt.Printf("Warning: failed to load/generate persistent node ID: %v. Falling back to advertise addr.\n", err)
+			nodeID = advertise
+		} else {
+			fmt.Printf("Persistent Node ID: %s (loaded from %s)\n", nodeID, dataDir)
+		}
 	}
 
 	// Parse bootstrap nodes
