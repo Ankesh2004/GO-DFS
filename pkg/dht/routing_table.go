@@ -59,6 +59,30 @@ func (rt *RoutingTable) AddNode(node NodeInfo) {
 	}
 }
 
+// RemoveNode removes a node from the routing table by ID.
+// Used to clean up temp entries when we learn the real advertise address.
+func (rt *RoutingTable) RemoveNode(id ID) {
+	if id == rt.localID {
+		return
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	bucketIdx := CommonPrefixLen(rt.localID, id)
+	if bucketIdx >= len(rt.buckets) {
+		bucketIdx = len(rt.buckets) - 1
+	}
+
+	bucket := rt.buckets[bucketIdx]
+	for i, n := range bucket {
+		if n.ID == id {
+			rt.buckets[bucketIdx] = append(bucket[:i], bucket[i+1:]...)
+			return
+		}
+	}
+}
+
 // GetClosestNodes returns the K closest nodes to the target ID
 func (rt *RoutingTable) GetClosestNodes(target ID, count int) []NodeInfo {
 	rt.mu.RLock()

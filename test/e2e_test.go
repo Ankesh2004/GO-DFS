@@ -30,6 +30,7 @@ func createTestServer(port string, bootstrap []string, t *testing.T, keepKey boo
 	options := server.FileServerOptions{
 		ID:             port,
 		RootDir:        dir,
+		AdvertiseAddr:  "127.0.0.1:" + port,
 		Transport:      transport,
 		BootstrapNodes: bootstrap,
 	}

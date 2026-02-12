@@ -3,39 +3,20 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/internal/server"
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
+	"github.com/Ankesh2004/GO-DFS/pkg/dht"
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
 )
-
-func OnPeerTest(peer p2p.Peer) error {
-	fmt.Println("works")
-	return nil
-}
-
-func createServer(addr string, nodes ...string) *server.FileServer {
-	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
-		ListenPort: addr,
-		Handshake:  p2p.SecureHandshake,
-		Decoder:    p2p.SampleDecoder{},
-	})
-	options := server.FileServerOptions{
-		ID:             "shared",
-		RootDir:        "./cas" + addr[8:12],
-		Transport:      transport,
-		BootstrapNodes: nodes,
-	}
-	s := server.NewFileServer(options)
-	transport.OnPeer = s.OnPeer
-	return s
-}
 
 func loadOrGenerateUserKey(filename string) ([]byte, error) {
 	key := make([]byte, 32)
@@ -64,7 +45,6 @@ func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error 
 	if err != nil {
 		return fmt.Errorf("failed to retrieve file: %w", err)
 	}
-	// Note: s.GetFile returns a reader that might be a file, so it might implement io.Closer
 	if closer, ok := r.(io.Closer); ok {
 		defer closer.Close()
 	}
@@ -101,11 +81,119 @@ func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error 
 }
 
 func main() {
-	fmt.Println("This is GO-DFS - Zero Trust Storage Demo")
+	// CLI flags for standalone node operation
+	port := flag.String("port", ":7000", "Listen port for P2P traffic (e.g. :7000)")
+	bootstrap := flag.String("bootstrap", "", "Comma-separated list of bootstrap node addresses (e.g. 1.2.3.4:7000,5.6.7.8:7000)")
+	advertise := flag.String("advertise", "", "Address to advertise to other peers (e.g. 203.0.113.5:7000). Auto-detected if empty.")
+	dataDir := flag.String("data", "", "Root directory for CAS storage. Defaults to ./cas_<port>")
+	nodeID := flag.String("id", "", "Node identity string. Defaults to listen address.")
+	relay := flag.Bool("relay", false, "If true, this node will act ONLY as a relay and won't store data")
+	demo := flag.Bool("demo", false, "Run the built-in two-node demo (original behavior)")
+	flag.Parse()
+
+	if *demo {
+		runDemo()
+		return
+	}
+	runNode(*port, *bootstrap, *advertise, *dataDir, *nodeID, *relay)
+}
+
+func runNode(port, bootstrap, advertise, dataDir, nodeID string, relay bool) {
+	fmt.Println("========================================")
+	fmt.Println("  GO-DFS Node — Global P2P File System")
 	fmt.Println("========================================")
 
-	s1 := createServer("0.0.0.0:7000")
-	s2 := createServer("0.0.0.0:7001", "0.0.0.0:7000")
+	// Figure out our public-facing address
+	if advertise == "" {
+		resolved, err := dht.ResolveAdvertiseAddr(port, "")
+		if err != nil {
+			fmt.Printf("Warning: could not auto-detect advertise address: %v\n", err)
+			advertise = port // worst case, use listen port
+		} else {
+			advertise = resolved
+		}
+	}
+
+	if nodeID == "" {
+		nodeID = advertise
+	}
+
+	if dataDir == "" {
+		// Extract port number for directory name
+		parts := strings.Split(port, ":")
+		suffix := parts[len(parts)-1]
+		dataDir = "./cas_" + suffix
+	}
+
+	// Parse bootstrap nodes
+	var bootstrapNodes []string
+	if bootstrap != "" {
+		bootstrapNodes = strings.Split(bootstrap, ",")
+	}
+
+	transport := p2p.NewTCPTransport(p2p.TCPTransportOptions{
+		ListenPort: port,
+		Handshake:  p2p.SecureHandshake,
+		Decoder:    p2p.SampleDecoder{},
+	})
+
+	opts := server.FileServerOptions{
+		ID:             nodeID,
+		RootDir:        dataDir,
+		AdvertiseAddr:  advertise,
+		Transport:      transport,
+		BootstrapNodes: bootstrapNodes,
+		RelayOnly:      relay,
+	}
+
+	s := server.NewFileServer(opts)
+	transport.OnPeer = s.OnPeer
+
+	fmt.Printf("Node ID    : %s\n", s.ID.String()[:16])
+	fmt.Printf("Listen     : %s\n", port)
+	fmt.Printf("Advertise  : %s\n", advertise)
+	fmt.Printf("Data Dir   : %s\n", dataDir)
+	fmt.Printf("Bootstrap  : %v\n", bootstrapNodes)
+	fmt.Printf("Relay Only : %v\n", relay)
+	fmt.Println("========================================")
+
+	// This blocks forever (the event loop)
+	if err := s.Start(); err != nil {
+		log.Fatalf("Node failed: %v", err)
+	}
+}
+
+// runDemo keeps the original two-node local demo for quick testing
+func runDemo() {
+	fmt.Println("GO-DFS — Two-Node Local Demo")
+	fmt.Println("========================================")
+
+	t1 := p2p.NewTCPTransport(p2p.TCPTransportOptions{
+		ListenPort: ":7000",
+		Handshake:  p2p.SecureHandshake,
+		Decoder:    p2p.SampleDecoder{},
+	})
+	s1 := server.NewFileServer(server.FileServerOptions{
+		ID:            "node1",
+		RootDir:       "./cas7000",
+		AdvertiseAddr: "127.0.0.1:7000",
+		Transport:     t1,
+	})
+	t1.OnPeer = s1.OnPeer
+
+	t2 := p2p.NewTCPTransport(p2p.TCPTransportOptions{
+		ListenPort: ":7001",
+		Handshake:  p2p.SecureHandshake,
+		Decoder:    p2p.SampleDecoder{},
+	})
+	s2 := server.NewFileServer(server.FileServerOptions{
+		ID:             "node2",
+		RootDir:        "./cas7001",
+		AdvertiseAddr:  "127.0.0.1:7001",
+		Transport:      t2,
+		BootstrapNodes: []string{"127.0.0.1:7000"},
+	})
+	t2.OnPeer = s2.OnPeer
 
 	go func() {
 		if err := s1.Start(); err != nil {
@@ -120,7 +208,7 @@ func main() {
 	}()
 	time.Sleep(2 * time.Second)
 
-	fmt.Printf("[%s] s1 peers: %d, s2 peers: %d\n", s1.Transport.Addr(), len(s1.GetPeers()), len(s2.GetPeers()))
+	fmt.Printf("s1 peers: %d, s2 peers: %d\n", len(s1.GetPeers()), len(s2.GetPeers()))
 
 	userKey, err := loadOrGenerateUserKey("myKey.key")
 	if err != nil {
@@ -138,13 +226,13 @@ func main() {
 
 	time.Sleep(2 * time.Second)
 
-	fmt.Println("\n>>> [S2] User requesting file download...")
+	fmt.Println("\n>>> [S2] Retrieving file...")
 	if err := RetrieveAndDecrypt(s2, messageKey, userKey); err != nil {
 		log.Fatalf("Retrieval failed: %v", err)
 	}
 
 	fmt.Println("\n========================================")
-	fmt.Println("Check 'myFiles/secret_notes.txt'!")
+	fmt.Println("Demo complete! Check 'myFiles/secret_notes.txt'")
 	fmt.Println("========================================")
 
 	select {}
