@@ -1,9 +1,11 @@
 package crypto
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -136,4 +138,25 @@ func incrementNonce(nonce []byte) {
 			break
 		}
 	}
+}
+
+// LoadOrGenerateKey loads a 32-byte key from a file, or generates a new one if it doesn't exist.
+func LoadOrGenerateKey(filename string) ([]byte, error) {
+	key := make([]byte, 32)
+	if _, err := os.Stat(filename); err == nil {
+		key, err = os.ReadFile(filename)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("Loaded user encryption key from %s\n", filename)
+	} else {
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filename, key, 0600); err != nil {
+			return nil, err
+		}
+		fmt.Printf("Generated and saved new user encryption key to %s\n", filename)
+	}
+	return key, nil
 }

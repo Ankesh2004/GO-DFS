@@ -57,19 +57,6 @@ func NewFileServer(options FileServerOptions) *FileServer {
 	}
 }
 
-// resolvePeerAddr translates a raw TCP address to the advertised address.
-// After PeerExchange, peers are keyed by their advertised addr in s.peers,
-// but incoming RPCs still use the raw TCP remote addr. This bridges that gap.
-func (s *FileServer) resolvePeerAddr(rawAddr string) string {
-	s.peersLock.Lock()
-	defer s.peersLock.Unlock()
-
-	if mapped, ok := s.addrMap[rawAddr]; ok {
-		return mapped
-	}
-	return rawAddr
-}
-
 // -------- Message Routing --------
 
 func (s *FileServer) handleMessage(from string, msg *Message) error {
