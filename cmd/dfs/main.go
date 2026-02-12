@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"flag"
@@ -106,6 +107,85 @@ func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error 
 	return nil
 }
 
+func commandLoop(s *server.FileServer, userKey []byte) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Println("\n>>> [CLI] Interacting with the mesh network.")
+	fmt.Println(">>> Type 'help' for available commands.")
+
+	for {
+		fmt.Print("\ndfs> ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+
+		parts := strings.Split(input, " ")
+		cmd := parts[0]
+		args := parts[1:]
+
+		switch cmd {
+		case "help":
+			fmt.Println("Available Commands:")
+			fmt.Println("  store <filename>  - Encrypt and store a local file in the network")
+			fmt.Println("  get <key>        - Retrieve and decrypt a file from the network")
+			fmt.Println("  peers            - List all currently connected peers")
+			fmt.Println("  id               - Show this node's identity and addresses")
+			fmt.Println("  exit             - Stop the node and exit")
+
+		case "store":
+			if len(args) < 1 {
+				fmt.Println("Error: missing filename. Usage: store <filename>")
+				continue
+			}
+			filePath := args[0]
+			file, err := os.Open(filePath)
+			if err != nil {
+				fmt.Printf("Error: could not open file: %v\n", err)
+				continue
+			}
+			key := filepath.Base(filePath)
+			fmt.Printf("Storing '%s' as key '%s'...\n", filePath, key)
+			if err := s.StoreData(key, userKey, file); err != nil {
+				fmt.Printf("Error: store failed: %v\n", err)
+			} else {
+				fmt.Println("Store SUCCESS!")
+			}
+			file.Close()
+
+		case "get":
+			if len(args) < 1 {
+				fmt.Println("Error: missing key. Usage: get <key>")
+				continue
+			}
+			key := args[0]
+			if err := RetrieveAndDecrypt(s, key, userKey); err != nil {
+				fmt.Printf("Error: retrieval failed: %v\n", err)
+			}
+
+		case "peers":
+			peers := s.GetPeers()
+			fmt.Printf("Connected Peers: %d\n", len(peers))
+			for addr := range peers {
+				fmt.Printf("  - %s\n", addr)
+			}
+
+		case "id":
+			fmt.Printf("Node ID   : %s\n", s.ID.String())
+			fmt.Printf("Advertise : %s\n", s.AdvertiseAddr)
+			fmt.Printf("Listen    : %s\n", s.Transport.Addr())
+
+		case "exit":
+			fmt.Println("Stopping node...")
+			s.Stop()
+			return
+
+		default:
+			fmt.Printf("Unknown command: %s. Type 'help' for info.\n", cmd)
+		}
+	}
+}
+
 func main() {
 	// CLI flags for standalone node operation
 	port := flag.String("port", ":7000", "Listen port for P2P traffic (e.g. :7000)")
@@ -190,10 +270,25 @@ func runNode(port, bootstrap, advertise, dataDir, nodeID string, relay bool) {
 	fmt.Printf("Relay Only : %v\n", relay)
 	fmt.Println("========================================")
 
-	// This blocks forever (the event loop)
-	if err := s.Start(); err != nil {
-		log.Fatalf("Node failed: %v", err)
+	// In runNode, we or generate a global user encryption key for this machine.
+	// In a real app, this would be tied to a user login.
+	userKey, err := loadOrGenerateUserKey("myKey.key")
+	if err != nil {
+		log.Fatalf("Failed to initialize user key: %v", err)
 	}
+
+	// Start the server in a goroutine so we can run the CLI loop
+	go func() {
+		if err := s.Start(); err != nil {
+			log.Fatalf("Node failed: %v", err)
+		}
+	}()
+
+	// Wait a bit for the bootstrap process to kick in
+	time.Sleep(1 * time.Second)
+
+	// Enter the interactive CLI loop
+	commandLoop(s, userKey)
 }
 
 // runDemo keeps the original two-node local demo for quick testing
