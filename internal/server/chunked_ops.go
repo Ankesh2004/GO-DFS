@@ -570,6 +570,13 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 			}
 		}
 	}
+	// record in local index so we can list stored files later
+	s.CIDIndex.Add(storage.CIDEntry{
+		CID:          cid,
+		OriginalName: originalName,
+		Size:         totalSize,
+		ChunkCount:   len(chunks),
+	})
 
 	return cid, nil
 }

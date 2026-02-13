@@ -36,9 +36,10 @@ type FileServer struct {
 	peers         map[string]p2p.Peer
 	peersLock     sync.Mutex
 	verifiedAddrs map[string]bool   // addresses that completed PeerExchange (safe to share/dial)
-	addrMap       map[string]string // raw TCP remote addr → advertised listen addr
+	addrMap       map[string]string // raw TCP remote addr --> advertised listen addr
 	relayPeers    map[string]bool   // map of advertised addrs that are RelayOnly=true
-	pendingChunks sync.Map          // chunkKey → chan struct{}, signals when a requested chunk arrives
+	pendingChunks sync.Map          // chunkKey --> chan struct{}, signals when a requested chunk arrives
+	CIDIndex      *storage.CIDIndex // local index mapping CID --> original filename
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
@@ -55,6 +56,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		verifiedAddrs:     make(map[string]bool),
 		addrMap:           make(map[string]string),
 		relayPeers:        make(map[string]bool),
+		CIDIndex:          storage.NewCIDIndex(options.RootDir),
 	}
 }
 

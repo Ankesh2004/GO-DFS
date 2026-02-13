@@ -73,6 +73,7 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 			fmt.Println("Available Commands:")
 			fmt.Println("  store <filename>       - Encrypt, chunk, and store a file (returns CID)")
 			fmt.Println("  get <CID> [filename]   - Retrieve and decrypt a file by its CID")
+			fmt.Println("  list                   - Show all files stored by this node")
 			fmt.Println("  peers                  - List all currently connected peers")
 			fmt.Println("  id                     - Show this node's identity and addresses")
 			fmt.Println("  exit                   - Stop the node and exit")
@@ -113,6 +114,22 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 			}
 			if err := RetrieveAndDecrypt(s, cid, saveName, userKey); err != nil {
 				fmt.Printf("Error: retrieval failed: %v\n", err)
+			}
+
+		case "list":
+			entries := s.CIDIndex.List()
+			if len(entries) == 0 {
+				fmt.Println("No files stored yet.")
+				continue
+			}
+			fmt.Printf("Stored Files: %d\n", len(entries))
+			fmt.Println("---")
+			for _, e := range entries {
+				fmt.Printf("  Name   : %s\n", e.OriginalName)
+				fmt.Printf("  CID    : %s\n", e.CID)
+				fmt.Printf("  Size   : %d bytes (%d chunks)\n", e.Size, e.ChunkCount)
+				fmt.Printf("  Stored : %s\n", e.StoredAt)
+				fmt.Println("---")
 			}
 
 		case "peers":
