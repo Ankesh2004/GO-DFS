@@ -38,6 +38,7 @@ type FileServer struct {
 	verifiedAddrs map[string]bool   // addresses that completed PeerExchange (safe to share/dial)
 	addrMap       map[string]string // raw TCP remote addr → advertised listen addr
 	relayPeers    map[string]bool   // map of advertised addrs that are RelayOnly=true
+	pendingChunks sync.Map          // chunkKey → chan struct{}, signals when a requested chunk arrives
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {

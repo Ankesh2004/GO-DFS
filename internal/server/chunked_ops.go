@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
@@ -89,6 +90,7 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 			return fmt.Errorf("failed to store relay stream data for %s: %w", meta.Key, err)
 		}
 		fmt.Printf("[%s] Stored relay stream chunk %s: %d bytes (verified)\n", s.Transport.Addr(), meta.Key, n)
+		s.notifyChunkArrived(meta.Key)
 		return nil
 	}
 
@@ -379,6 +381,7 @@ func (s *FileServer) handleChunkData(from string, msg MessageChunkData) error {
 	}
 	fmt.Printf("[%s] Stored chunk %s (%d bytes, verified) from %s\n",
 		s.Transport.Addr(), msg.ChunkKey[:16], n, from)
+	s.notifyChunkArrived(msg.ChunkKey)
 	return nil
 }
 
@@ -698,6 +701,17 @@ func (s *FileServer) fetchChunksParallel(chunkKeys []string) {
 
 // fetchSingleChunk asks peers for a specific chunk
 func (s *FileServer) fetchSingleChunk(chunkKey string) {
+	// if we already have it (e.g. from a previous replication), skip the network
+	if s.Store.Has(chunkKey) {
+		return
+	}
+
+	// register a notification channel so handleChunkData / handleRelayStream
+	// can wake us up the instant the chunk lands on disk
+	ch := make(chan struct{}, 1)
+	s.pendingChunks.Store(chunkKey, ch)
+	defer s.pendingChunks.Delete(chunkKey)
+
 	getMsg := &Message{Payload: MessageGetChunk{ChunkKey: chunkKey}}
 
 	// ask DHT-nearest nodes first
@@ -732,16 +746,30 @@ func (s *FileServer) fetchSingleChunk(chunkKey string) {
 		}
 	}
 
-	// TODO: wait for the chunk to arrive — in a real system we would use channels,
-	// but for now a simple poll loop works
-	for i := 0; i < 10; i++ {
-		sleepFn(500)
-		if s.Store.Has(chunkKey) {
-			fmt.Printf("[%s] Chunk %s received!\n", s.Transport.Addr(), chunkKey[:16])
-			return
+	// block until the chunk arrives or we time out.
+	// the receive handlers (handleChunkData, handleRelayStream) will
+	// call notifyChunkArrived which closes this channel instantly.
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+
+	select {
+	case <-ch:
+		fmt.Printf("[%s] Chunk %s received!\n", s.Transport.Addr(), chunkKey[:16])
+	case <-timer.C:
+		fmt.Printf("[%s] WARNING: chunk %s not received after 5s timeout\n", s.Transport.Addr(), chunkKey[:16])
+	}
+}
+
+// notifyChunkArrived signals any goroutine that's waiting for this chunk.
+// safe to call even if nobody is waiting — the signal is just dropped.
+func (s *FileServer) notifyChunkArrived(chunkKey string) {
+	if val, ok := s.pendingChunks.LoadAndDelete(chunkKey); ok {
+		ch := val.(chan struct{})
+		select {
+		case ch <- struct{}{}:
+		default:
 		}
 	}
-	fmt.Printf("[%s] WARNING: chunk %s not received after timeout\n", s.Transport.Addr(), chunkKey[:16])
 }
 
 // -------- Helpers --------
