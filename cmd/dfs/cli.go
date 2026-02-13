@@ -12,11 +12,12 @@ import (
 	"github.com/Ankesh2004/GO-DFS/internal/server"
 )
 
-// RetrieveAndDecrypt fetches a file from the network, decrypts it, and saves locally.
-func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error {
-	fmt.Printf(">>> Retrieving file: %s\n", key)
+// RetrieveAndDecrypt fetches a file by its CID, decrypts it, and saves locally.
+// saveName is the filename to save as; if empty, falls back to the CID.
+func RetrieveAndDecrypt(s *server.FileServer, cid string, saveName string, userKey []byte) error {
+	fmt.Printf(">>> Retrieving CID: %s\n", cid)
 
-	r, err := s.GetFileChunked(key)
+	r, err := s.GetFileChunked(cid)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve file: %w", err)
 	}
@@ -30,11 +31,16 @@ func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error 
 		return fmt.Errorf("decryption failed: %w", err)
 	}
 
+	// use the provided name, or fall back to the CID
+	if saveName == "" {
+		saveName = cid
+	}
+
 	destDir := "myFiles"
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		return err
 	}
-	destPath := filepath.Join(destDir, key)
+	destPath := filepath.Join(destDir, saveName)
 	if err := os.WriteFile(destPath, decryptedBuf.Bytes(), 0644); err != nil {
 		return err
 	}
@@ -65,11 +71,11 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 		switch cmd {
 		case "help":
 			fmt.Println("Available Commands:")
-			fmt.Println("  store <filename>  - Encrypt, chunk, and store a file in the network")
-			fmt.Println("  get <key>        - Retrieve and decrypt a file from the network")
-			fmt.Println("  peers            - List all currently connected peers")
-			fmt.Println("  id               - Show this node's identity and addresses")
-			fmt.Println("  exit             - Stop the node and exit")
+			fmt.Println("  store <filename>       - Encrypt, chunk, and store a file (returns CID)")
+			fmt.Println("  get <CID> [filename]   - Retrieve and decrypt a file by its CID")
+			fmt.Println("  peers                  - List all currently connected peers")
+			fmt.Println("  id                     - Show this node's identity and addresses")
+			fmt.Println("  exit                   - Stop the node and exit")
 
 		case "store":
 			if len(args) < 1 {
@@ -82,22 +88,30 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 				fmt.Printf("Error: could not open file: %v\n", err)
 				continue
 			}
-			key := filepath.Base(filePath)
-			fmt.Printf("Storing '%s' as key '%s' (chunked)...\n", filePath, key)
-			if err := s.StoreDataChunked(key, userKey, file); err != nil {
+			originalName := filepath.Base(filePath)
+			fmt.Printf("Storing '%s'...\n", originalName)
+			cid, err := s.StoreDataChunked(originalName, userKey, file)
+			file.Close()
+			if err != nil {
 				fmt.Printf("Error: store failed: %v\n", err)
 			} else {
 				fmt.Println("Store SUCCESS!")
+				fmt.Printf("  CID: %s\n", cid)
+				fmt.Println("  (use this CID to retrieve the file from any node with your key)")
 			}
-			file.Close()
 
 		case "get":
 			if len(args) < 1 {
-				fmt.Println("Error: missing key. Usage: get <key>")
+				fmt.Println("Error: missing CID. Usage: get <CID> [filename]")
 				continue
 			}
-			key := args[0]
-			if err := RetrieveAndDecrypt(s, key, userKey); err != nil {
+			cid := args[0]
+			// optional: let the user override the save filename
+			saveName := ""
+			if len(args) >= 2 {
+				saveName = args[1]
+			}
+			if err := RetrieveAndDecrypt(s, cid, saveName, userKey); err != nil {
 				fmt.Printf("Error: retrieval failed: %v\n", err)
 			}
 

@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sync"
@@ -412,14 +414,15 @@ func (s *FileServer) pushChunkToAddr(addr string, chunkKey string) error {
 
 // -------- Chunked StoreData --------
 
-// StoreDataChunked is the new chunked version of StoreData.
-// It encrypts the file, splits it into chunks, stores each chunk in the CAS,
-// creates a manifest, and replicates everything to the K-closest DHT nodes.
-func (s *FileServer) StoreDataChunked(key string, userEncryptionKey []byte, r io.Reader) error {
-	// step 1: encrypt the whole file into a pipe (same as before)
+// StoreDataChunked encrypts, chunks, and stores a file in the network.
+// Returns the Content ID (CID) — a SHA-256 hash of the encrypted content.
+// The CID is how you retrieve the file later; it's collision-proof and
+// means two different files can never overwrite each other's manifests.
+func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []byte, r io.Reader) (string, error) {
+	// step 1: encrypt the whole file into a pipe
 	userNonce := make([]byte, crypto.NonceSize)
 	if _, err := randRead(userNonce); err != nil {
-		return err
+		return "", err
 	}
 
 	pr, pw := io.Pipe()
@@ -439,16 +442,25 @@ func (s *FileServer) StoreDataChunked(key string, userEncryptionKey []byte, r io
 		encryptErr <- err
 	}()
 
-	// step 2: chunk the encrypted stream and store each chunk
-	chunks, err := s.Store.ChunkAndStore(pr, storage.DefaultChunkSize)
+	// step 2: hash the encrypted stream while chunking it.
+	// TeeReader lets us compute SHA-256 of the entire ciphertext without
+	// buffering it — the hasher sees every byte the chunker reads.
+	hasher := sha256.New()
+	tee := io.TeeReader(pr, hasher)
+
+	chunks, err := s.Store.ChunkAndStore(tee, storage.DefaultChunkSize)
 	pr.Close()
 
 	if err != nil {
-		return fmt.Errorf("chunking failed: %w", err)
+		return "", fmt.Errorf("chunking failed: %w", err)
 	}
 	if encErr := <-encryptErr; encErr != nil {
-		return fmt.Errorf("encryption failed: %w", encErr)
+		return "", fmt.Errorf("encryption failed: %w", encErr)
 	}
+
+	// the CID is the hex-encoded SHA-256 of the entire encrypted content.
+	// two different files will always produce different CIDs.
+	cid := hex.EncodeToString(hasher.Sum(nil))
 
 	// step 3: build the manifest
 	chunkKeys := make([]string, len(chunks))
@@ -459,27 +471,27 @@ func (s *FileServer) StoreDataChunked(key string, userEncryptionKey []byte, r io
 	}
 
 	manifest := FileManifest{
-		OriginalKey: key,
+		OriginalKey: originalName, // human-readable name, not the network key
 		TotalSize:   totalSize,
 		ChunkSize:   storage.DefaultChunkSize,
 		ChunkKeys:   chunkKeys,
 	}
 
-	// store manifest locally
-	manifestKey := key + ".manifest"
+	// store manifest locally under the CID
+	manifestKey := cid + ".manifest"
 	var manifestBuf bytes.Buffer
 	if err := gob.NewEncoder(&manifestBuf).Encode(manifest); err != nil {
-		return fmt.Errorf("failed to encode manifest: %w", err)
+		return "", fmt.Errorf("failed to encode manifest: %w", err)
 	}
 	if _, err := s.Store.WriteStream(manifestKey, &manifestBuf); err != nil {
-		return fmt.Errorf("failed to store manifest: %w", err)
+		return "", fmt.Errorf("failed to store manifest: %w", err)
 	}
 
-	fmt.Printf("[%s] File chunked: %d chunks, %d bytes total, manifest key: %s\n",
-		s.Transport.Addr(), len(chunks), totalSize, manifestKey)
+	fmt.Printf("[%s] File stored: CID=%s, name=%s, %d chunks, %d bytes\n",
+		s.Transport.Addr(), cid[:16], originalName, len(chunks), totalSize)
 
 	// step 4: replicate manifest + chunks to DHT-nearest nodes
-	targetID := dht.NewID(key)
+	targetID := dht.NewID(cid)
 	closest := s.DHT.NearestNodes(targetID, dht.K)
 
 	// fall back to all direct peers if DHT is empty
@@ -526,7 +538,7 @@ func (s *FileServer) StoreDataChunked(key string, userEncryptionKey []byte, r io
 		}
 	}
 
-	return nil
+	return cid, nil
 }
 
 type multiReadCloser struct {
