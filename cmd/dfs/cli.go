@@ -10,14 +10,13 @@ import (
 	"strings"
 
 	"github.com/Ankesh2004/GO-DFS/internal/server"
-	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
 )
 
-// RetrieveAndDecrypt is a high-level helper for the CLI to fetch and save files locally.
+// RetrieveAndDecrypt fetches a file from the network, decrypts it, and saves locally.
 func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error {
 	fmt.Printf(">>> Retrieving file: %s\n", key)
 
-	r, err := s.GetFile(key)
+	r, err := s.GetFileChunked(key)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve file: %w", err)
 	}
@@ -25,20 +24,9 @@ func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error 
 		defer closer.Close()
 	}
 
-	encryptedBlob, err := io.ReadAll(r)
-	if err != nil {
-		return fmt.Errorf("failed to read blob: %w", err)
-	}
-	fmt.Printf("Received encrypted blob size: %d bytes\n", len(encryptedBlob))
-
-	if len(encryptedBlob) < 12 {
-		return fmt.Errorf("invalid blob size")
-	}
-	nonce := encryptedBlob[:12]
-	ciphertext := encryptedBlob[12:]
-
+	// decrypt as a stream — no need to load the whole thing into memory
 	decryptedBuf := new(bytes.Buffer)
-	if _, err := crypto.Decrypt(userKey, nonce, bytes.NewReader(ciphertext), decryptedBuf); err != nil {
+	if err := server.DecryptStream(userKey, r, decryptedBuf); err != nil {
 		return fmt.Errorf("decryption failed: %w", err)
 	}
 
@@ -52,7 +40,7 @@ func RetrieveAndDecrypt(s *server.FileServer, key string, userKey []byte) error 
 	}
 
 	fmt.Printf("✓ File retrieved, decrypted, and saved to: %s\n", destPath)
-	fmt.Printf("✓ Content: %s\n", decryptedBuf.String())
+	fmt.Printf("✓ Size: %d bytes\n", decryptedBuf.Len())
 	return nil
 }
 
@@ -77,7 +65,7 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 		switch cmd {
 		case "help":
 			fmt.Println("Available Commands:")
-			fmt.Println("  store <filename>  - Encrypt and store a local file in the network")
+			fmt.Println("  store <filename>  - Encrypt, chunk, and store a file in the network")
 			fmt.Println("  get <key>        - Retrieve and decrypt a file from the network")
 			fmt.Println("  peers            - List all currently connected peers")
 			fmt.Println("  id               - Show this node's identity and addresses")
@@ -95,8 +83,8 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 				continue
 			}
 			key := filepath.Base(filePath)
-			fmt.Printf("Storing '%s' as key '%s'...\n", filePath, key)
-			if err := s.StoreData(key, userKey, file); err != nil {
+			fmt.Printf("Storing '%s' as key '%s' (chunked)...\n", filePath, key)
+			if err := s.StoreDataChunked(key, userKey, file); err != nil {
 				fmt.Printf("Error: store failed: %v\n", err)
 			} else {
 				fmt.Println("Store SUCCESS!")

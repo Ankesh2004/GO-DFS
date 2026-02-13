@@ -188,7 +188,9 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 			break
 		}
 		rpc.From = peer.RemoteAddr().String()
-		if rpc.isStream {
+
+		if rpc.IsStream {
+			// direct stream — block the read loop until the consumer is done with it
 			tcpPeer := peer.(*TCPPeer)
 			tcpPeer.streamMu.Lock()
 			tcpPeer.streamActive = true
@@ -200,7 +202,22 @@ func (t *TCPTransport) handleConnection(conn net.Conn, isOutbound bool) {
 			continue
 		}
 
-		t.rpcChannel <- rpc // dump the data from this channel into (this)transport's channel
-		// fmt.Println(string(rpc.Payload))
+		if rpc.IsRelay {
+			// relay stream — server needs the peer connection to pipe bytes,
+			// so we block here just like a direct stream
+			tcpPeer := peer.(*TCPPeer)
+			tcpPeer.streamMu.Lock()
+			tcpPeer.streamActive = true
+			tcpPeer.Wg.Add(1)
+			tcpPeer.streamMu.Unlock()
+
+			t.rpcChannel <- rpc
+
+			// wait until the server is done piping the data
+			tcpPeer.Wg.Wait()
+			continue
+		}
+
+		t.rpcChannel <- rpc // normal message, just forward it
 	}
 }

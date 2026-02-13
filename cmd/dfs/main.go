@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -93,7 +94,11 @@ func runNode(port, bootstrap, advertise, dataDir, nodeID string, relay bool) {
 	fmt.Println("========================================")
 
 	// 5. Initialize Keys and Start
-	userKey, err := crypto.LoadOrGenerateKey("myKey.key")
+	// each node's encryption key lives inside its own data directory.
+	// this is critical for zero-trust: only the owner of the key can decrypt.
+	// if two nodes share the same key file, any node can read the other's files.
+	keyPath := filepath.Join(dataDir, "myKey.key")
+	userKey, err := crypto.LoadOrGenerateKey(keyPath)
 	if err != nil {
 		log.Fatalf("Fatal: user key failure: %v", err)
 	}

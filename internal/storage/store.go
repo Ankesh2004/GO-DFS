@@ -47,11 +47,11 @@ func (s *Store) GetCASPath(key string) Path {
 // WriteStream reads from r and writes to the CAS store.
 func (s *Store) WriteStream(key string, r io.Reader) (int64, error) {
 	cas := s.GetCASPath(key)
-	if err := os.MkdirAll(cas.Path, 0755); err != nil {
+	if err := mkdirAll(cas.Path); err != nil {
 		return 0, err
 	}
 	fmt.Println(cas.FullPath())
-	file, err := os.Create(cas.FullPath())
+	file, err := createFile(cas.FullPath())
 	if err != nil {
 		return 0, err
 	}
@@ -92,4 +92,14 @@ func (s *Store) Has(key string) bool {
 
 func (s *Store) Wipe() error {
 	return os.RemoveAll(s.RootDir)
+}
+
+// -------- helpers --------
+
+func mkdirAll(path string) error {
+	return os.MkdirAll(path, 0755)
+}
+
+func createFile(path string) (*os.File, error) {
+	return os.Create(path)
 }
