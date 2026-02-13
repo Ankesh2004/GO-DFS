@@ -16,6 +16,18 @@ import (
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
 )
 
+// verifyChunkHash checks that the SHA-256 of data matches the expected key.
+// This is the core of zero-trust: we never trust a peer's claim about
+// what chunk they're sending us. If the hash doesn't match, they lied.
+func verifyChunkHash(expectedKey string, data []byte) error {
+	actual := sha256.Sum256(data)
+	actualHex := hex.EncodeToString(actual[:])
+	if actualHex != expectedKey {
+		return fmt.Errorf("chunk integrity failed: expected %s, got %s", expectedKey[:16], actualHex[:16])
+	}
+	return nil
+}
+
 // relayBufPool is used during relay stream piping so we're not
 // allocating 32KB buffers on every relay request. Critical for
 // bootstrap nodes that handle tons of relay traffic.
@@ -58,13 +70,25 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 			return nil
 		}
 
-		// write the streamed bytes directly to our local store
-		n, err := s.Store.WriteStream(meta.Key, io.LimitReader(sourcePeer, meta.TotalSize))
+		// read the streamed bytes into memory so we can verify the hash
+		// before committing to disk. this prevents a malicious peer from
+		// poisoning our store with garbage under a valid chunk key.
+		data := make([]byte, meta.TotalSize)
+		_, err := io.ReadFull(sourcePeer, data)
 		sourcePeer.CloseStream()
+		if err != nil {
+			return fmt.Errorf("failed to read relay stream data for %s: %w", meta.Key, err)
+		}
+
+		if err := verifyChunkHash(meta.Key, data); err != nil {
+			return fmt.Errorf("[%s] REJECTING relay chunk from %s: %w", s.Transport.Addr(), meta.OriginAddr, err)
+		}
+
+		n, err := s.Store.WriteStream(meta.Key, bytes.NewReader(data))
 		if err != nil {
 			return fmt.Errorf("failed to store relay stream data for %s: %w", meta.Key, err)
 		}
-		fmt.Printf("[%s] Stored relay stream chunk %s: %d bytes\n", s.Transport.Addr(), meta.Key, n)
+		fmt.Printf("[%s] Stored relay stream chunk %s: %d bytes (verified)\n", s.Transport.Addr(), meta.Key, n)
 		return nil
 	}
 
@@ -343,12 +367,18 @@ func (s *FileServer) handleChunkData(from string, msg MessageChunkData) error {
 		return nil
 	}
 
+	// verify the hash before storing — a malicious peer could send
+	// random bytes claiming they're chunk "abc123..."
+	if err := verifyChunkHash(msg.ChunkKey, msg.Data); err != nil {
+		return fmt.Errorf("[%s] REJECTING chunk from %s: %w", s.Transport.Addr(), from, err)
+	}
+
 	n, err := s.Store.WriteStream(msg.ChunkKey, bytes.NewReader(msg.Data))
 	if err != nil {
 		return fmt.Errorf("failed to store chunk data %s: %w", msg.ChunkKey, err)
 	}
-	fmt.Printf("[%s] Stored chunk %s (%d bytes) via relay message from %s\n",
-		s.Transport.Addr(), msg.ChunkKey, n, from)
+	fmt.Printf("[%s] Stored chunk %s (%d bytes, verified) from %s\n",
+		s.Transport.Addr(), msg.ChunkKey[:16], n, from)
 	return nil
 }
 
