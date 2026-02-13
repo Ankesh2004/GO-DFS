@@ -79,6 +79,21 @@ func (s *FileServer) handleMessage(from string, msg *Message) error {
 		return s.handlePing(from)
 	case MessagePong:
 		return nil
+
+	// chunk + manifest handlers
+	case MessageStoreManifest:
+		return s.handleStoreManifest(from, v)
+	case MessageGetManifest:
+		return s.handleGetManifest(from, v)
+	case MessageManifestResponse:
+		return s.handleManifestResponse(from, v)
+	case MessageStoreChunk:
+		return s.handleStoreChunk(from, v)
+	case MessageGetChunk:
+		return s.handleGetChunk(from, v)
+	case MessageChunkData:
+		return s.handleChunkData(from, v)
+
 	default:
 		return fmt.Errorf("unknown message type: %T", msg.Payload)
 	}
@@ -408,7 +423,9 @@ func (s *FileServer) runDiscoveryRound() {
 	}
 }
 
-// -------- File Operations (zero-trust model) --------
+// -------- Legacy File Operations (pre-chunking) --------
+// DEPRECATED: Superseded by StoreDataChunked / GetFileChunked.
+// Kept for backward compatibility (relay_test.go uses these).
 
 func (s *FileServer) handleMessageStoreFile(from string, msg MessageStoreFile) error {
 	if s.RelayOnly {
@@ -573,6 +590,8 @@ func (s *FileServer) sendToPeer(peer p2p.Peer, msg *Message) error {
 
 // -------- GetFile / StoreData --------
 
+// GetFile is the legacy (non-chunked) get method.
+// DEPRECATED: use GetFileChunked instead. Kept as fallback for backward compat.
 func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	// check in local storage first
 	if s.Store.Has(key) {
@@ -657,7 +676,8 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 	return r, err
 }
 
-// CountingWriter tracks bytes written
+// CountingWriter tracks bytes written.
+// DEPRECATED: only used by legacy StoreData.
 type CountingWriter struct {
 	W     io.Writer
 	Count int64
@@ -669,6 +689,8 @@ func (cw *CountingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// StoreData is the legacy (non-chunked) store method.
+// DEPRECATED: use StoreDataChunked instead. Kept for backward compat.
 func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader) error {
 	userNonce := make([]byte, crypto.NonceSize)
 	if _, err := rand.Read(userNonce); err != nil {
@@ -775,8 +797,8 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 	return nil
 }
 
-// pushToAddr is a helper that decides the best way to move file data to a node.
-// It will stream directly if connected, or use a relay message otherwise.
+// pushToAddr is the legacy data push helper.
+// DEPRECATED: use pushChunkToAddr instead. Kept for backward compat.
 func (s *FileServer) pushToAddr(addr string, key string) error {
 	s.peersLock.Lock()
 	peer, directConn := s.peers[addr]
@@ -902,12 +924,22 @@ func (s *FileServer) loop() {
 	for {
 		select {
 		case rpc := <-s.Transport.Consume():
+			// relay stream — the transport already decoded the header,
+			// now we need to pipe the raw bytes to the right place
+			if rpc.IsRelay && rpc.RelayMeta != nil {
+				resolvedFrom := s.resolvePeerAddr(rpc.From)
+				if err := s.handleRelayStream(resolvedFrom, rpc); err != nil {
+					fmt.Printf("Error handling relay stream: %v\n", err)
+				}
+				continue
+			}
+
+			// normal message — decode the gob payload
 			var msg Message
 			if err := gob.NewDecoder(bytes.NewReader(rpc.Payload)).Decode(&msg); err != nil {
 				fmt.Println("Error decoding payload: ", err)
 				continue
 			}
-			// Resolve raw TCP address to advertised address before handling
 			resolvedFrom := s.resolvePeerAddr(rpc.From)
 			if err := s.handleMessage(resolvedFrom, &msg); err != nil {
 				fmt.Println("Error handling message: ", err)

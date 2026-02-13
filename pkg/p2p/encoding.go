@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-const MaxMessageSize = 1024 * 1024 // 1MB maximum for metadata messages
+const MaxMessageSize = 2 * 1024 * 1024 // 2MB max for metadata/control messages
 
 type Decoder interface {
 	Decode(io.Reader, *RPC) error
@@ -31,13 +31,47 @@ func (d SampleDecoder) Decode(r io.Reader, rpc *RPC) error {
 		return err
 	}
 
-	// Case 1: Stream. Just set flag and let the consumer handle the rest.
+	// Case 1: Direct stream between two directly connected peers
 	if peekBuf[0] == IncomingStream {
-		rpc.isStream = true
+		rpc.IsStream = true
 		return nil
 	}
 
-	// Case 2: Message. We expect a 4-byte length prefix.
+	// Case 2: Relay stream — sender wants us to pipe raw bytes to a target
+	// Wire format: [0x3] [4-byte header len] [gob-encoded RelayStreamMeta] [raw data...]
+	// We only decode the header here; the server layer handles the raw data piping.
+	if peekBuf[0] == IncomingRelayStream {
+		rpc.IsRelay = true
+
+		// read the header length
+		var headerLen uint32
+		if err := binary.Read(r, binary.LittleEndian, &headerLen); err != nil {
+			return fmt.Errorf("failed to read relay stream header length: %w", err)
+		}
+
+		// sanity check — header should never be more than a few KB
+		if headerLen == 0 || headerLen > 64*1024 {
+			return fmt.Errorf("invalid relay stream header length: %d", headerLen)
+		}
+
+		headerBuf := make([]byte, headerLen)
+		if _, err := io.ReadFull(r, headerBuf); err != nil {
+			return fmt.Errorf("failed to read relay stream header: %w", err)
+		}
+
+		var meta RelayStreamMeta
+		if err := gob.NewDecoder(io.LimitReader(
+			// we already have the bytes, wrap them so gob can read
+			readerFromBytes(headerBuf), int64(headerLen),
+		)).Decode(&meta); err != nil {
+			return fmt.Errorf("failed to decode relay stream header: %w", err)
+		}
+
+		rpc.RelayMeta = &meta
+		return nil
+	}
+
+	// Case 3: Normal framed message
 	if peekBuf[0] != IncomingMessage {
 		return fmt.Errorf("invalid message type: %d", peekBuf[0])
 	}
@@ -58,6 +92,25 @@ func (d SampleDecoder) Decode(r io.Reader, rpc *RPC) error {
 	}
 
 	return nil
+}
+
+// readerFromBytes is a tiny helper so we don't import bytes just for this
+type bytesReader struct {
+	data []byte
+	pos  int
+}
+
+func readerFromBytes(b []byte) io.Reader {
+	return &bytesReader{data: b}
+}
+
+func (br *bytesReader) Read(p []byte) (int, error) {
+	if br.pos >= len(br.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, br.data[br.pos:])
+	br.pos += n
+	return n, nil
 }
 
 /*
@@ -104,4 +157,11 @@ works in a clean sequence:
 By using Framing, we synchronized the byte-stream logically rather than trying to
 synchronize it with a clock. This means even if you have a 10Gbps connection and zero
 latency, the bytes will always align perfectly.
+
+4. Relay Streams (new)
+For relay streams (0x3), the format is:
+[0x3] [4-byte header len] [gob-encoded RelayStreamMeta] [raw data bytes...]
+
+The decoder reads the type byte, then the header. After that, the server layer
+takes over and pipes TotalSize bytes from the connection to the target peer.
 */

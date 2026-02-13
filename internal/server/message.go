@@ -1,6 +1,10 @@
 package server
 
-import "encoding/gob"
+import (
+	"encoding/gob"
+
+	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
+)
 
 func init() {
 	// Register all message types for gob encoding/decoding.
@@ -14,6 +18,17 @@ func init() {
 	gob.Register(MessagePong{})
 	gob.Register(MessageRelay{})
 	gob.Register(MessageRelayData{})
+
+	// chunk + manifest messages
+	gob.Register(MessageStoreManifest{})
+	gob.Register(MessageGetManifest{})
+	gob.Register(MessageManifestResponse{})
+	gob.Register(MessageStoreChunk{})
+	gob.Register(MessageGetChunk{})
+	gob.Register(MessageChunkData{})
+
+	// relay stream header — needed for the streaming relay protocol
+	gob.Register(p2p.RelayStreamMeta{})
 }
 
 // Message is the wrapper for all inter-node communication
@@ -79,7 +94,57 @@ type MessageRelay struct {
 // This is how file data travels through relay nodes when there's no direct connection.
 // For direct peers, we still use the faster raw TCP streaming.
 // For relayed transfers, we buffer the data into this message instead.
+// DEPRECATED for large files — use the streaming relay protocol instead.
+// Still used for small control payloads and backward compat.
 type MessageRelayData struct {
 	Key  string // file key
 	Data []byte // the actual encrypted file bytes
+}
+
+// -------- Chunking & Manifest Messages --------
+
+// FileManifest describes a chunked file — stored alongside the chunks in the CAS.
+// The manifest itself is replicated to the K-closest nodes just like any chunk.
+type FileManifest struct {
+	OriginalKey string   // the user-facing filename/key
+	TotalSize   int64    // original encrypted file size (sum of all chunks)
+	ChunkSize   int64    // size of each chunk (last one may be smaller)
+	ChunkKeys   []string // ordered list of chunk content-hash keys
+}
+
+// MessageStoreManifest tells a peer "here's the manifest for a file, store it"
+type MessageStoreManifest struct {
+	Key      string       // the manifest key (hash of the original key + ".manifest")
+	Manifest FileManifest // the actual manifest data
+}
+
+// MessageGetManifest asks a peer for a file's manifest
+type MessageGetManifest struct {
+	Key string // manifest key
+}
+
+// MessageManifestResponse is the reply — sends the manifest back
+type MessageManifestResponse struct {
+	Key      string       // manifest key
+	Manifest FileManifest // the manifest data
+	Found    bool         // false if the peer doesn't have it
+}
+
+// MessageStoreChunk is the metadata message sent before streaming chunk data.
+// For direct peers, the raw bytes follow on the TCP connection.
+// For relayed transfers, a streaming relay or MessageChunkData is used.
+type MessageStoreChunk struct {
+	ChunkKey string // content-hash of this chunk
+	Size     int64  // how many bytes of chunk data follow
+}
+
+// MessageGetChunk asks a peer for a specific chunk by its content hash
+type MessageGetChunk struct {
+	ChunkKey string
+}
+
+// MessageChunkData carries chunk bytes inside a relay message (fallback for small chunks)
+type MessageChunkData struct {
+	ChunkKey string
+	Data     []byte
 }

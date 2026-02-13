@@ -3,8 +3,20 @@ package server
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
+)
+
+// function variables so chunked_ops can use them without importing directly.
+// also makes testing easier if we ever need to stub these out.
+var (
+	randRead  = func(b []byte) (int, error) { return rand.Read(b) }
+	encryptFn = crypto.Encrypt
+	sleepFn   = func(ms int) { time.Sleep(time.Duration(ms) * time.Millisecond) }
 )
 
 // resolvePeerAddr translates a raw TCP address to the advertised address.
@@ -46,4 +58,15 @@ func LoadOrGenerateNodeID(dataDir string) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// DecryptStream is a helper exposed for the CLI layer — it reads encrypted
+// data with the prepended nonce, decrypts, and writes to dst.
+func DecryptStream(userKey []byte, src io.Reader, dst io.Writer) error {
+	nonce := make([]byte, crypto.NonceSize)
+	if _, err := io.ReadFull(src, nonce); err != nil {
+		return fmt.Errorf("failed to read nonce: %w", err)
+	}
+	_, err := crypto.Decrypt(userKey, nonce, src, dst)
+	return err
 }
