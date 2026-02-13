@@ -93,7 +93,7 @@ func (s *Store) ChunkAndStore(src io.Reader, chunkSize int64) ([]ChunkResult, er
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("chunk %d read error: %w", index, err)
+			return nil, fmt.Errorf("chunk %d read error: %w", index-1, err)
 		}
 	}
 

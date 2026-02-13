@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
+	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
 	"github.com/Ankesh2004/GO-DFS/pkg/dht"
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
 )
@@ -97,11 +98,17 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 	n, err := io.CopyBuffer(targetPeer, io.LimitReader(sourcePeer, meta.TotalSize), *bufPtr)
 	relayBufPool.Put(bufPtr)
 
-	sourcePeer.CloseStream()
-
 	if err != nil {
+		// drain any unread bytes so the connection stays in sync
+		remaining := meta.TotalSize - n
+		if remaining > 0 {
+			_, _ = io.CopyN(io.Discard, sourcePeer, remaining)
+		}
+		sourcePeer.CloseStream()
 		return fmt.Errorf("relay pipe error after %d bytes: %w", n, err)
 	}
+
+	sourcePeer.CloseStream()
 
 	fmt.Printf("[%s] Relay stream piped %d bytes for chunk %s\n", s.Transport.Addr(), n, meta.Key)
 	return nil
@@ -276,12 +283,12 @@ func (s *FileServer) handleGetChunk(from string, msg MessageGetChunk) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
 
 	// for chunks small enough to fit in a message, just send them inline.
 	// this avoids the protocol complexity of setting up a stream for each chunk.
 	const inlineMax = 900 * 1024 // 900KB fits comfortably in MaxMessageSize (2MB)
 	if size <= inlineMax {
+		defer r.Close()
 		data, err := io.ReadAll(r)
 		if err != nil {
 			return err
@@ -297,6 +304,7 @@ func (s *FileServer) handleGetChunk(from string, msg MessageGetChunk) error {
 			s.Transport.Addr(), msg.ChunkKey[:16], len(data), from)
 		return s.sendToAddr(from, respMsg)
 	}
+	r.Close() // close the size-check reader, we'll reopen in the loop for streaming
 
 	// large chunk — use streaming relay to get it to the requester
 	s.peersLock.Lock()
@@ -307,9 +315,19 @@ func (s *FileServer) handleGetChunk(from string, msg MessageGetChunk) error {
 	s.peersLock.Unlock()
 
 	for _, relay := range possibleRelays {
+		// open a fresh reader for each relay attempt
+		_, rr, err := s.Store.ReadStream(msg.ChunkKey)
+		if err != nil {
+			continue
+		}
+
 		fmt.Printf("[%s] Relay-streaming chunk %s to %s via %s\n",
 			s.Transport.Addr(), msg.ChunkKey[:16], from, relay.RemoteAddr().String())
-		if err := s.sendRelayStream(relay, from, msg.ChunkKey, size, r); err == nil {
+
+		sendErr := s.sendRelayStream(relay, from, msg.ChunkKey, size, rr)
+		rr.Close()
+
+		if sendErr == nil {
 			return nil
 		}
 	}
@@ -342,12 +360,12 @@ func (s *FileServer) pushChunkToAddr(addr string, chunkKey string) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
 
 	// for chunks small enough to fit in a message, send inline.
 	// this is simpler and doesn't require the receiver to handle stream RPCs.
 	const inlineMax = 900 * 1024
 	if size <= inlineMax {
+		defer r.Close()
 		data, err := io.ReadAll(r)
 		if err != nil {
 			return err
@@ -361,6 +379,7 @@ func (s *FileServer) pushChunkToAddr(addr string, chunkKey string) error {
 		}
 		return s.sendToAddr(addr, msg)
 	}
+	r.Close() // close the size-check reader, we'll reopen in the loop for streaming
 
 	// large chunk — need streaming relay
 	s.peersLock.Lock()
@@ -371,9 +390,19 @@ func (s *FileServer) pushChunkToAddr(addr string, chunkKey string) error {
 	s.peersLock.Unlock()
 
 	for _, relay := range possibleRelays {
+		// open a fresh reader for each relay attempt
+		_, rr, err := s.Store.ReadStream(chunkKey)
+		if err != nil {
+			continue
+		}
+
 		fmt.Printf("[%s] Relay-streaming chunk %s to %s via %s\n",
 			s.Transport.Addr(), chunkKey[:16], addr, relay.RemoteAddr().String())
-		if err := s.sendRelayStream(relay, addr, chunkKey, size, r); err == nil {
+
+		sendErr := s.sendRelayStream(relay, addr, chunkKey, size, rr)
+		rr.Close()
+
+		if sendErr == nil {
 			return nil
 		}
 	}
@@ -388,7 +417,7 @@ func (s *FileServer) pushChunkToAddr(addr string, chunkKey string) error {
 // creates a manifest, and replicates everything to the K-closest DHT nodes.
 func (s *FileServer) StoreDataChunked(key string, userEncryptionKey []byte, r io.Reader) error {
 	// step 1: encrypt the whole file into a pipe (same as before)
-	userNonce := make([]byte, 12) // crypto.NonceSize
+	userNonce := make([]byte, crypto.NonceSize)
 	if _, err := randRead(userNonce); err != nil {
 		return err
 	}
@@ -500,6 +529,21 @@ func (s *FileServer) StoreDataChunked(key string, userEncryptionKey []byte, r io
 	return nil
 }
 
+type multiReadCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (mrc *multiReadCloser) Close() error {
+	var err error
+	for _, c := range mrc.closers {
+		if e := c.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
 // -------- Chunked GetFile --------
 
 // GetFileChunked is the new chunked version of GetFile.
@@ -560,18 +604,32 @@ func (s *FileServer) GetFileChunked(key string) (io.Reader, error) {
 
 	// reassemble: create a multi-reader from all chunks in order
 	readers := make([]io.Reader, 0, len(manifest.ChunkKeys))
+	closers := make([]io.Closer, 0, len(manifest.ChunkKeys))
+
 	for _, ck := range manifest.ChunkKeys {
 		if !s.Store.Has(ck) {
+			// clean up already opened readers
+			for _, c := range closers {
+				c.Close()
+			}
 			return nil, fmt.Errorf("chunk %s still missing after network fetch", ck[:16])
 		}
 		_, r, err := s.Store.ReadStream(ck)
 		if err != nil {
+			// clean up already opened readers
+			for _, c := range closers {
+				c.Close()
+			}
 			return nil, fmt.Errorf("failed to read chunk %s: %w", ck[:16], err)
 		}
 		readers = append(readers, r)
+		closers = append(closers, r)
 	}
 
-	return io.MultiReader(readers...), nil
+	return &multiReadCloser{
+		Reader:  io.MultiReader(readers...),
+		closers: closers,
+	}, nil
 }
 
 // fetchChunksParallel spawns workers to fetch missing chunks concurrently.
@@ -616,18 +674,23 @@ func (s *FileServer) fetchSingleChunk(chunkKey string) {
 
 	// also ask all direct peers as fallback
 	s.peersLock.Lock()
+	peers := make([]string, 0, len(s.peers))
 	for addr := range s.peers {
 		if addr == s.AdvertiseAddr {
 			continue
 		}
+		peers = append(peers, addr)
+	}
+	s.peersLock.Unlock()
+
+	for _, addr := range peers {
 		if err := s.sendToAddr(addr, getMsg); err != nil {
 			fmt.Printf("[%s] Failed to request chunk %s from %s: %v\n",
 				s.Transport.Addr(), chunkKey[:16], addr, err)
 		}
 	}
-	s.peersLock.Unlock()
 
-	// wait for the chunk to arrive — in a real system you'd use channels,
+	// TODO: wait for the chunk to arrive — in a real system we would use channels,
 	// but for now a simple poll loop works
 	for i := 0; i < 10; i++ {
 		sleepFn(500)
