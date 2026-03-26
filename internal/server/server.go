@@ -31,6 +31,7 @@ type FileServer struct {
 	ID          dht.ID
 	DHT         *dht.Kademlia
 	Store       *storage.Store
+	Tombstones  *storage.TombstoneStore
 	quitChannel chan struct{}
 
 	peers         map[string]p2p.Peer
@@ -51,6 +52,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		ID:                id,
 		DHT:               dht.NewKademlia(id),
 		Store:             store,
+		Tombstones:        storage.NewTombstoneStore(options.RootDir),
 		quitChannel:       make(chan struct{}),
 		peers:             make(map[string]p2p.Peer),
 		verifiedAddrs:     make(map[string]bool),
@@ -96,6 +98,12 @@ func (s *FileServer) handleMessage(from string, msg *Message) error {
 		return s.handleGetChunk(from, v)
 	case MessageChunkData:
 		return s.handleChunkData(from, v)
+
+	// tombstone deletion handlers
+	case MessageDeleteFile:
+		return s.handleDeleteFile(from, v)
+	case MessageTombstoneSync:
+		return s.handleTombstoneSync(from, v)
 
 	default:
 		return fmt.Errorf("unknown message type: %T", msg.Payload)
@@ -860,8 +868,9 @@ func (s *FileServer) Start() error {
 		s.bootstrapNetwork()
 	}
 
-	// Start the periodic discovery loop in the background
+	// Start background loops
 	go s.discoveryLoop()
+	go s.gcLoop() // GC for expired tombstones
 
 	s.loop()
 	return nil
@@ -891,6 +900,15 @@ func (s *FileServer) OnPeer(P p2p.Peer) error {
 	// Immediately exchange identities so both sides know who they're talking to
 	if err := s.sendPeerExchange(P); err != nil {
 		fmt.Printf("[%s] Failed to send PeerExchange to %s: %v\n", s.Transport.Addr(), peerAddr, err)
+	}
+
+	// Piggyback any tombstones we have so the new peer catches up on deletions
+	// that happened while it was offline. Only send if we actually have some.
+	if tombstones := s.Tombstones.All(); len(tombstones) > 0 {
+		syncMsg := &Message{Payload: MessageTombstoneSync{Tombstones: tombstones}}
+		if err := s.sendToPeer(P, syncMsg); err != nil {
+			fmt.Printf("[%s] Failed to send TombstoneSync to %s: %v\n", s.Transport.Addr(), peerAddr, err)
+		}
 	}
 
 	return nil

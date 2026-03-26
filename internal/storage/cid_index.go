@@ -59,6 +59,19 @@ func (idx *CIDIndex) List() []CIDEntry {
 	return result
 }
 
+// Remove deletes an entry from the index and persists to disk.
+// No-op if the CID isn't in the index.
+func (idx *CIDIndex) Remove(cid string) error {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if _, exists := idx.entries[cid]; !exists {
+		return nil // nothing to do
+	}
+	delete(idx.entries, cid)
+	return idx.save()
+}
+
 // load reads the index from disk. if the file doesn't exist, it's a no-op.
 func (idx *CIDIndex) load() {
 	data, err := os.ReadFile(idx.path)

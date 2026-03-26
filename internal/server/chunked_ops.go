@@ -303,6 +303,12 @@ func (s *FileServer) handleStoreChunk(from string, msg MessageStoreChunk) error 
 // -------- Get Chunk --------
 
 func (s *FileServer) handleGetChunk(from string, msg MessageGetChunk) error {
+	// chunk is tombstoned — we deleted it, don't serve it even if bytes are still on disk
+	if s.Tombstones.IsDead(msg.ChunkKey) {
+		fmt.Printf("[%s] Refusing GetChunk for tombstoned key %s\n", s.Transport.Addr(), msg.ChunkKey[:16])
+		return nil
+	}
+
 	if !s.Store.Has(msg.ChunkKey) {
 		return nil // we don't have it, silently ignore
 	}
@@ -366,6 +372,15 @@ func (s *FileServer) handleGetChunk(from string, msg MessageGetChunk) error {
 // handleChunkData handles chunk data that arrived inside a relay message (small chunks fallback)
 func (s *FileServer) handleChunkData(from string, msg MessageChunkData) error {
 	if s.RelayOnly {
+		return nil
+	}
+
+	// refuse to accept data for a chunk we've already tombstoned.
+	// this can happen if a peer that was offline during deletion comes back and
+	// tries to re-push old chunks — we need to reject them during the grace period.
+	if s.Tombstones.IsDead(msg.ChunkKey) {
+		fmt.Printf("[%s] Refusing incoming tombstoned chunk %s from %s\n",
+			s.Transport.Addr(), msg.ChunkKey[:16], from)
 		return nil
 	}
 
