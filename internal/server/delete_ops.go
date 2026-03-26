@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
@@ -39,14 +40,18 @@ func (s *FileServer) DeleteFile(cid string) error {
 
 	tombstones := make([]storage.Tombstone, 0, len(keys))
 	for _, key := range keys {
+		// Kill MUST succeed before we delete bytes or tell the network.
+		// If the tombstone isn't persisted, we could lose track of the deletion
+		// and the file could resurface after a restart — abort the whole operation.
 		if err := s.Tombstones.Kill(key); err != nil {
-			fmt.Printf("[%s] Warning: failed to tombstone %s: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
+			return fmt.Errorf("delete: failed to tombstone %s: %w", truncateKey(key, 16), err)
 		}
 		tombstones = append(tombstones, storage.Tombstone{
 			ChunkKey:  key,
 			DeletedAt: time.Now(),
 		})
 		// delete the bytes immediately from local CAS
+		// if this fails, the GC loop will clean them up later — tombstone is already set
 		if s.Store.Has(key) {
 			if err := s.Store.DeleteStream(key); err != nil {
 				fmt.Printf("[%s] Warning: failed to delete local bytes for %s: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
@@ -119,11 +124,21 @@ func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
 		// so they don't accidentally serve anything if something slipped through
 	}
 
+	// track the first Kill error — we still process the rest of the tombstones
+	// as best-effort cleanup, but we'll return the error at the end so the
+	// caller knows something went wrong instead of silently getting nil.
+	var firstKillErr error
+
 	for _, t := range msg.Tombstones {
-		// apply tombstone (idempotent — Kill checks before overwriting)
+		// apply tombstone first — if this fails, don't delete the bytes
+		// (a un-tombstoned chunk that still has bytes is safer than a
+		// un-tombstoned chunk with deleted bytes and no record of why)
 		if err := s.Tombstones.Kill(t.ChunkKey); err != nil {
 			fmt.Printf("[%s] Warning: tombstone failed for %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
-			continue
+			if firstKillErr == nil {
+				firstKillErr = err
+			}
+			continue // don't delete bytes without a persisted tombstone
 		}
 		// delete local bytes
 		if s.Store.Has(t.ChunkKey) {
@@ -135,8 +150,14 @@ func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
 		}
 	}
 
-	// also remove from our local CIDIndex if we have an entry for this CID
+	// best-effort: remove from CIDIndex regardless of Kill failures
+	// (the index is cosmetic — an incomplete entry is less harmful than leaving it)
 	s.CIDIndex.Remove(msg.CID)
+
+	if firstKillErr != nil {
+		return fmt.Errorf("handleDeleteFile %s: some tombstones failed to persist: %w",
+			truncateKey(msg.CID, 16), firstKillErr)
+	}
 
 	fmt.Printf("[%s] Applied %d tombstones for file %s\n",
 		s.Transport.Addr(), len(msg.Tombstones), truncateKey(msg.CID, 16))
@@ -159,6 +180,12 @@ func (s *FileServer) handleTombstoneSync(_ string, msg MessageTombstoneSync) err
 
 	// delete any local bytes we have for newly tombstoned chunks
 	for _, t := range msg.Tombstones {
+		// If this is a manifest tombstone, also clean up the CID index
+		if strings.HasSuffix(t.ChunkKey, ".manifest") {
+			cid := strings.TrimSuffix(t.ChunkKey, ".manifest")
+			s.CIDIndex.Remove(cid)
+		}
+
 		if !s.Store.Has(t.ChunkKey) {
 			continue
 		}
