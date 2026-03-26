@@ -76,7 +76,7 @@ func (s *Store) ChunkAndStore(src io.Reader, chunkSize int64) ([]ChunkResult, er
 		/*
 			In systems like S3 or Dropbox that do cross-user dedup, they use convergent encryption (key = SHA256(plaintext)) to make identical plaintexts produce identical ciphertext.
 			But that has its own attacks.
-			This project wisely avoids that complexity by NOT DOING CROSS-USER DEDUPLICATION.
+			This project wisely avoids that complexity by NOT DOING CROSS-USER DEDUPLICATION (if there is differet key + nounce despite same plaintext, it will be stored as different chunk).
 		*/
 		written, writeErr := s.WriteRaw(chunkKey, chunkData)
 		bufPool.Put(bufPtr) // return buffer ASAP
