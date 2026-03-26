@@ -8,7 +8,14 @@ import (
 	"github.com/Ankesh2004/GO-DFS/pkg/dht"
 )
 
-// -------- DeleteFile (called from the CLI) --------
+// truncateKey safely shortens a key string for log output.
+// avoids a panic when a key is somehow shorter than maxLen.
+func truncateKey(key string, maxLen int) string {
+	if len(key) <= maxLen {
+		return key
+	}
+	return key[:maxLen]
+}
 
 // DeleteFile deletes a file from the network by:
 //  1. Loading the manifest to get all chunk keys
@@ -33,7 +40,7 @@ func (s *FileServer) DeleteFile(cid string) error {
 	tombstones := make([]storage.Tombstone, 0, len(keys))
 	for _, key := range keys {
 		if err := s.Tombstones.Kill(key); err != nil {
-			fmt.Printf("[%s] Warning: failed to tombstone %s: %v\n", s.Transport.Addr(), key[:16], err)
+			fmt.Printf("[%s] Warning: failed to tombstone %s: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
 		}
 		tombstones = append(tombstones, storage.Tombstone{
 			ChunkKey:  key,
@@ -42,7 +49,7 @@ func (s *FileServer) DeleteFile(cid string) error {
 		// delete the bytes immediately from local CAS
 		if s.Store.Has(key) {
 			if err := s.Store.DeleteStream(key); err != nil {
-				fmt.Printf("[%s] Warning: failed to delete local bytes for %s: %v\n", s.Transport.Addr(), key[:16], err)
+				fmt.Printf("[%s] Warning: failed to delete local bytes for %s: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
 			}
 		}
 	}
@@ -51,7 +58,7 @@ func (s *FileServer) DeleteFile(cid string) error {
 	s.CIDIndex.Remove(cid)
 
 	fmt.Printf("[%s] Deleted file %s locally (%d chunks + manifest)\n",
-		s.Transport.Addr(), cid[:16], len(manifest.ChunkKeys))
+		s.Transport.Addr(), truncateKey(cid, 16), len(manifest.ChunkKeys))
 
 	// broadcast the tombstones to the network
 	// we send to DHT-nearest nodes AND all direct peers for maximum reach
@@ -115,15 +122,15 @@ func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
 	for _, t := range msg.Tombstones {
 		// apply tombstone (idempotent — Kill checks before overwriting)
 		if err := s.Tombstones.Kill(t.ChunkKey); err != nil {
-			fmt.Printf("[%s] Warning: tombstone failed for %s: %v\n", s.Transport.Addr(), t.ChunkKey[:16], err)
+			fmt.Printf("[%s] Warning: tombstone failed for %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 			continue
 		}
 		// delete local bytes
 		if s.Store.Has(t.ChunkKey) {
 			if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
-				fmt.Printf("[%s] Warning: failed to delete bytes for %s: %v\n", s.Transport.Addr(), t.ChunkKey[:16], err)
+				fmt.Printf("[%s] Warning: failed to delete bytes for %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 			} else {
-				fmt.Printf("[%s] Deleted chunk %s (tombstoned by peer)\n", s.Transport.Addr(), t.ChunkKey[:16])
+				fmt.Printf("[%s] Deleted chunk %s (tombstoned by peer)\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16))
 			}
 		}
 	}
@@ -132,7 +139,7 @@ func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
 	s.CIDIndex.Remove(msg.CID)
 
 	fmt.Printf("[%s] Applied %d tombstones for file %s\n",
-		s.Transport.Addr(), len(msg.Tombstones), msg.CID[:16])
+		s.Transport.Addr(), len(msg.Tombstones), truncateKey(msg.CID, 16))
 	return nil
 }
 
@@ -157,7 +164,7 @@ func (s *FileServer) handleTombstoneSync(_ string, msg MessageTombstoneSync) err
 		}
 		if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
 			fmt.Printf("[%s] Warning: failed to delete bytes for synced tombstone %s: %v\n",
-				s.Transport.Addr(), t.ChunkKey[:16], err)
+				s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 		}
 	}
 
@@ -200,7 +207,7 @@ func (s *FileServer) runGC() {
 		// make sure bytes are gone
 		if s.Store.Has(t.ChunkKey) {
 			if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
-				fmt.Printf("[%s] GC: failed to delete %s: %v\n", s.Transport.Addr(), t.ChunkKey[:16], err)
+				fmt.Printf("[%s] GC: failed to delete %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 				continue
 			}
 		}
@@ -209,7 +216,7 @@ func (s *FileServer) runGC() {
 		// the user can safely re-store the same file later (new keys due to new nonce)
 		if time.Since(t.DeletedAt) > storage.TombstoneGracePeriod {
 			if err := s.Tombstones.Purge(t.ChunkKey); err != nil {
-				fmt.Printf("[%s] GC: failed to purge tombstone %s: %v\n", s.Transport.Addr(), t.ChunkKey[:16], err)
+				fmt.Printf("[%s] GC: failed to purge tombstone %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 				continue
 			}
 			cleaned++
