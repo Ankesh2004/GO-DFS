@@ -119,10 +119,9 @@ func (s *FileServer) broadcastDeleteToNetwork(cid string, msg *Message) {
 // We don't re-broadcast here — that would flood the network.
 // Offline peers catch up via MessageTombstoneSync when they reconnect.
 func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
-	if s.RelayOnly {
-		// relay nodes shouldn't be storing data anyway, but apply tombstones
-		// so they don't accidentally serve anything if something slipped through
-	}
+	// note: relay nodes (s.RelayOnly = true) shouldn't be storing data anyway,
+	// but we still apply tombstones so they don't accidentally serve anything
+	// if something slipped through.
 
 	// track the first Kill error — we still process the rest of the tombstones
 	// as best-effort cleanup, but we'll return the error at the end so the
