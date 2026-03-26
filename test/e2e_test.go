@@ -3,7 +3,6 @@ package test
 import (
 	"bytes"
 	"crypto/rand"
-	"io"
 	"os"
 	"testing"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/Ankesh2004/GO-DFS/internal/server"
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
+	"io"
 )
 
 func createTestServer(port string, bootstrap []string, t *testing.T, keepKey bool) *server.FileServer {
@@ -129,4 +129,100 @@ func TestEndToEndIntegrity(t *testing.T) {
 	} else {
 		t.Log("SUCCESS: S2 stored encrypted data.")
 	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	s1 := createTestServer("6010", nil, t, false)
+	defer s1.Stop()
+	defer os.RemoveAll("./test_cas_6010")
+
+	s2 := createTestServer("6011", []string{":6010"}, t, false)
+	defer s2.Stop()
+	defer os.RemoveAll("./test_cas_6011")
+
+	go func() {
+		if err := s1.Start(); err != nil {
+			t.Logf("s1 stopped: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	go func() {
+		if err := s2.Start(); err != nil {
+			t.Logf("s2 stopped: %v", err)
+		}
+	}()
+	time.Sleep(1 * time.Second)
+
+	// store a small file using the chunked path (the one the CLI actually calls)
+	userKey := make([]byte, 32)
+	rand.Read(userKey)
+
+	payload := bytes.NewReader([]byte("delete me from the whole network!"))
+	t.Log("Storing file on s1...")
+	cid, err := s1.StoreDataChunked("delete_test.txt", userKey, payload)
+	if err != nil {
+		t.Fatalf("StoreDataChunked failed: %v", err)
+	}
+	t.Logf("CID: %s", cid)
+
+	// give s2 time to receive the replicated manifest + chunks
+	time.Sleep(800 * time.Millisecond)
+
+	manifestKey := cid + ".manifest"
+
+	// s1 must have the manifest before we delete
+	if !s1.Store.Has(manifestKey) {
+		t.Fatalf("s1 should have the manifest before delete")
+	}
+
+	t.Log("Calling DeleteFile on s1...")
+	if err := s1.DeleteFile(cid); err != nil {
+		t.Fatalf("DeleteFile failed: %v", err)
+	}
+
+	// give MessageDeleteFile time to propagate to s2
+	time.Sleep(500 * time.Millisecond)
+
+	// --- s1 checks ---
+	if s1.Store.Has(manifestKey) {
+		t.Errorf("FAIL: s1 still has the manifest after deletion")
+	} else {
+		t.Log("OK: s1 manifest deleted from CAS")
+	}
+
+	if !s1.Tombstones.IsDead(manifestKey) {
+		t.Errorf("FAIL: s1 tombstone not active for manifest key")
+	} else {
+		t.Log("OK: s1 tombstone is active for manifest")
+	}
+
+	// --- s2 checks ---
+	if !s2.Tombstones.IsDead(manifestKey) {
+		t.Errorf("FAIL: s2 tombstone not set — MessageDeleteFile may not have reached s2")
+	} else {
+		t.Log("OK: s2 tombstone is active (propagated from s1)")
+	}
+
+	if s2.Store.Has(manifestKey) {
+		t.Errorf("FAIL: s2 still has manifest bytes after receiving delete message")
+	} else {
+		t.Log("OK: s2 manifest deleted from CAS")
+	}
+
+	// --- chunk tombstones ---
+	allTombstones := s1.Tombstones.All()
+	if len(allTombstones) == 0 {
+		t.Errorf("FAIL: s1 has no tombstones at all")
+	} else {
+		t.Logf("OK: s1 has %d tombstone(s) active", len(allTombstones))
+	}
+
+	// CIDIndex should no longer list this file
+	for _, entry := range s1.CIDIndex.List() {
+		if entry.CID == cid {
+			t.Errorf("FAIL: s1 CIDIndex still contains deleted CID %s", cid[:16])
+		}
+	}
+	t.Log("OK: s1 CIDIndex no longer lists the deleted file")
 }

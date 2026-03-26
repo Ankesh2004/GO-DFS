@@ -73,6 +73,7 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 			fmt.Println("Available Commands:")
 			fmt.Println("  store <filename>       - Encrypt, chunk, and store a file (returns CID)")
 			fmt.Println("  get <CID> [filename]   - Retrieve and decrypt a file by its CID")
+			fmt.Println("  delete <CID>           - Delete a file from the network (tombstones all chunks)")
 			fmt.Println("  list                   - Show all files stored by this node")
 			fmt.Println("  peers                  - List all currently connected peers")
 			fmt.Println("  id                     - Show this node's identity and addresses")
@@ -114,6 +115,20 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 			}
 			if err := RetrieveAndDecrypt(s, cid, saveName, userKey); err != nil {
 				fmt.Printf("Error: retrieval failed: %v\n", err)
+			}
+
+		case "delete":
+			if len(args) < 1 {
+				fmt.Println("Error: missing CID. Usage: delete <CID>")
+				continue
+			}
+			cid := args[0]
+			fmt.Printf("Deleting file %s from the network...\n", cid)
+			if err := s.DeleteFile(cid); err != nil {
+				fmt.Printf("Error: delete failed: %v\n", err)
+			} else {
+				fmt.Println("Delete SUCCESS — tombstones broadcast to network.")
+				fmt.Println("  (peers will delete their copies within the GC window)")
 			}
 
 		case "list":

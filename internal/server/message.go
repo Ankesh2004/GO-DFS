@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/gob"
 
+	"github.com/Ankesh2004/GO-DFS/internal/storage"
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
 )
 
@@ -29,6 +30,11 @@ func init() {
 
 	// relay stream header — needed for the streaming relay protocol
 	gob.Register(p2p.RelayStreamMeta{})
+
+	// tombstone deletion messages
+	gob.Register(MessageDeleteFile{})
+	gob.Register(MessageTombstoneSync{})
+	gob.Register(storage.Tombstone{})
 }
 
 // Message is the wrapper for all inter-node communication
@@ -147,4 +153,21 @@ type MessageGetChunk struct {
 type MessageChunkData struct {
 	ChunkKey string
 	Data     []byte
+}
+
+// -------- Tombstone / Deletion Messages --------
+
+// MessageDeleteFile is broadcast by the file owner to kick off network-wide deletion.
+// Contains tombstones for every chunk + the manifest key.
+// Receivers apply the tombstones locally, delete chunk bytes, and do NOT re-broadcast
+// (avoids a flood — offline peers catch up via MessageTombstoneSync on reconnect).
+type MessageDeleteFile struct {
+	CID        string               // the CID being deleted (for logging)
+	Tombstones []storage.Tombstone  // one entry per chunk + one for the manifest
+}
+
+// MessageTombstoneSync is sent alongside PeerExchange so newly connected peers
+// learn about deletions that happened while they were offline.
+type MessageTombstoneSync struct {
+	Tombstones []storage.Tombstone
 }
