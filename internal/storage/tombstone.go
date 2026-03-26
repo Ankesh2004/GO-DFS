@@ -8,15 +8,9 @@ import (
 	"time"
 )
 
-// how long a tombstone sticks around after the bytes are deleted.
-// 24h is plenty of time for offline peers to come back and learn about the deletion.
-// after that, the tombstone record is purged — safe because a re-store of the same
-// file always produces fresh chunk keys (new random nonce each time).
-const TombstoneGracePeriod = 24 * time.Hour
-
 // Tombstone marks a chunk as permanently deleted.
-// We keep this around for the grace period to block any stale
-// offline peer from re-pushing old data back into our store.
+// We keep this around indefinitely as a delete journal to ensure
+// offline peers can always sync and learn about the deletion when they reconnect.
 type Tombstone struct {
 	ChunkKey  string    `json:"chunk_key"`
 	DeletedAt time.Time `json:"deleted_at"`
@@ -52,18 +46,13 @@ func (ts *TombstoneStore) Kill(chunkKey string) error {
 	return ts.save()
 }
 
-// IsDead checks if chunkKey has been tombstoned and the grace period is still active.
-// Once the grace period expires the tombstone is considered gone — re-stores are fine.
+// IsDead checks if chunkKey has been tombstoned.
 func (ts *TombstoneStore) IsDead(chunkKey string) bool {
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 
-	t, ok := ts.entries[chunkKey]
-	if !ok {
-		return false
-	}
-	// still within grace period — treat as dead
-	return time.Since(t.DeletedAt) < TombstoneGracePeriod
+	_, ok := ts.entries[chunkKey]
+	return ok
 }
 
 // All returns a snapshot of all current tombstones (for sync messages to new peers).
@@ -78,15 +67,6 @@ func (ts *TombstoneStore) All() []Tombstone {
 	return result
 }
 
-// Purge removes a tombstone record entirely. Only call this after the grace period
-// has expired and the chunk bytes are confirmed gone.
-func (ts *TombstoneStore) Purge(chunkKey string) error {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-
-	delete(ts.entries, chunkKey)
-	return ts.save()
-}
 
 // ApplyBatch adds multiple tombstones at once (used during TombstoneSync).
 // skips any that are already in our store.

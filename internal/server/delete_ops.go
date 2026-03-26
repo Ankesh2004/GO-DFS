@@ -204,9 +204,8 @@ func (s *FileServer) handleTombstoneSync(_ string, msg MessageTombstoneSync) err
 
 // gcLoop runs every 10 minutes.
 // For each tombstone:
-//   - deletes the chunk bytes from CAS (in case any slipped through)
-//   - purges the tombstone record itself once the 24h grace period has passed
-//     (safe because re-storing the same file always generates new chunk keys)
+//   - deletes the chunk bytes from CAS (in case any slipped through or disk write failed earlier)
+//     (The tombstone record itself stays indefinitely as a delete journal for offline peers)
 func (s *FileServer) gcLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
@@ -237,20 +236,11 @@ func (s *FileServer) runGC() {
 				fmt.Printf("[%s] GC: failed to delete %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 				continue
 			}
-		}
-
-		// once the grace period is over, drop the tombstone record itself
-		// the user can safely re-store the same file later (new keys due to new nonce)
-		if time.Since(t.DeletedAt) > storage.TombstoneGracePeriod {
-			if err := s.Tombstones.Purge(t.ChunkKey); err != nil {
-				fmt.Printf("[%s] GC: failed to purge tombstone %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
-				continue
-			}
 			cleaned++
 		}
 	}
 
 	if cleaned > 0 {
-		fmt.Printf("[%s] GC: purged %d expired tombstone records\n", s.Transport.Addr(), cleaned)
+		fmt.Printf("[%s] GC: removed local bytes for %d tombstoned chunks\n", s.Transport.Addr(), cleaned)
 	}
 }
