@@ -261,10 +261,16 @@ func (s *FileServer) runReplicationAudit() {
 			continue
 		}
 		for _, chunkKey := range manifest.ChunkKeys {
-			if !s.Tombstones.IsDead(chunkKey) {
-				allChunks = append(allChunks, chunkKey)
-				ownedChunks[chunkKey] = true
+			if s.Tombstones.IsDead(chunkKey) {
+				continue
 			}
+			// dedup — CAS means multiple files can reference the same chunk.
+			// without this check the same chunk gets audited/pushed/dropped twice.
+			if ownedChunks[chunkKey] {
+				continue
+			}
+			allChunks = append(allChunks, chunkKey)
+			ownedChunks[chunkKey] = true
 		}
 	}
 
