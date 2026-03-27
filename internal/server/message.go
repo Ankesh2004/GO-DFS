@@ -35,6 +35,11 @@ func init() {
 	gob.Register(MessageDeleteFile{})
 	gob.Register(MessageTombstoneSync{})
 	gob.Register(storage.Tombstone{})
+
+	// replication protocol messages
+	gob.Register(MessageBatchChunkQuery{})
+	gob.Register(MessageBatchChunkResponse{})
+	gob.Register(MessageDropChunk{})
 }
 
 // Message is the wrapper for all inter-node communication
@@ -170,4 +175,30 @@ type MessageDeleteFile struct {
 // learn about deletions that happened while they were offline.
 type MessageTombstoneSync struct {
 	Tombstones []storage.Tombstone
+}
+
+// -------- Replication Protocol Messages --------
+
+// MessageBatchChunkQuery asks a peer about multiple chunks at once.
+// way more efficient than asking one-by-one — one round trip gives us
+// the full picture of what this peer has instead of N separate questions.
+type MessageBatchChunkQuery struct {
+	ChunkKeys []string // all the chunks we want to know about
+	AuditID   string   // ties the response back to the right audit round
+	ReplyAddr string   // where to send the response
+}
+
+// MessageBatchChunkResponse is the answer — lists which of the asked chunks
+// this peer actually has on disk. only includes the ones it has, not the full list.
+type MessageBatchChunkResponse struct {
+	AuditID    string   // matches the query
+	HeldChunks []string // chunk keys this peer holds (subset of what was asked)
+	HolderAddr string   // advertise addr of the responding peer
+}
+
+// MessageDropChunk tells a node it can delete a chunk because there are
+// already enough replicas in the network. the node is free to ignore this
+// if it thinks it still needs the data (e.g. it's the owner).
+type MessageDropChunk struct {
+	ChunkKey string // chunk to drop
 }

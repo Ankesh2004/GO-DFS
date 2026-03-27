@@ -76,6 +76,7 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 			fmt.Println("  delete <CID>           - Delete a file from the network (tombstones all chunks)")
 			fmt.Println("  list                   - Show all files stored by this node")
 			fmt.Println("  peers                  - List all currently connected peers")
+			fmt.Println("  status                 - Show peer health and replication audit results")
 			fmt.Println("  id                     - Show this node's identity and addresses")
 			fmt.Println("  exit                   - Stop the node and exit")
 
@@ -158,6 +159,29 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 			fmt.Printf("Node ID   : %s\n", s.ID.String())
 			fmt.Printf("Advertise : %s\n", s.AdvertiseAddr)
 			fmt.Printf("Listen    : %s\n", s.Transport.Addr())
+
+		case "status":
+			// peer health
+			healthMap := s.GetPeerHealthMap()
+			fmt.Printf("Peer Health (%d peers):\n", len(healthMap))
+			for addr, h := range healthMap {
+				status := "HEALTHY"
+				if h.MissedPings > 0 {
+					status = fmt.Sprintf("WARNING (%d missed pings)", h.MissedPings)
+				}
+				fmt.Printf("  %s — %s (last seen: %s)\n", addr, status, h.LastSeen.Format("15:04:05"))
+			}
+
+			// replication audit results
+			healthy, under, over, lastAudit := s.GetReplicationStatus()
+			if lastAudit.IsZero() {
+				fmt.Println("\nReplication Audit: not yet run")
+			} else {
+				fmt.Printf("\nLast Audit: %s\n", lastAudit.Format("15:04:05"))
+				fmt.Printf("  Healthy chunks : %d\n", healthy)
+				fmt.Printf("  Under-replicated: %d\n", under)
+				fmt.Printf("  Over-replicated : %d\n", over)
+			}
 
 		case "exit":
 			fmt.Println("Stopping node...")

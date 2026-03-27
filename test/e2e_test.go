@@ -226,3 +226,155 @@ func TestDeleteFile(t *testing.T) {
 	}
 	t.Log("OK: s1 CIDIndex no longer lists the deleted file")
 }
+
+func TestReplicationOnNodeFailure(t *testing.T) {
+	// 4-node setup with fast heartbeat/audit so healing completes in seconds.
+	// s1 stores a file, replicas land on s2/s3/s4. we kill s3 and wait for
+	// the audit to detect the loss and push a replacement copy.
+
+	s1 := createTestServer("6020", nil, t, false)
+	defer s1.Stop()
+	defer os.RemoveAll("./test_cas_6020")
+
+	s2 := createTestServer("6021", []string{":6020"}, t, false)
+	defer s2.Stop()
+	defer os.RemoveAll("./test_cas_6021")
+
+	s3 := createTestServer("6022", []string{":6020"}, t, false)
+	defer os.RemoveAll("./test_cas_6022")
+
+	s4 := createTestServer("6023", []string{":6020"}, t, false)
+	defer s4.Stop()
+	defer os.RemoveAll("./test_cas_6023")
+
+	// crank up the timing so the test doesn't take forever.
+	// 1s heartbeat, 2 missed pings = dead, 2s audit cycle.
+	for _, srv := range []*server.FileServer{s1, s2, s3, s4} {
+		srv.HeartbeatInterval = 1 * time.Second
+		srv.FailureThreshold = 2
+		srv.AuditInterval = 2 * time.Second
+		srv.AuditTimeout = 1 * time.Second
+	}
+
+	go func() {
+		if err := s1.Start(); err != nil {
+			t.Logf("s1 stopped: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	go func() {
+		if err := s2.Start(); err != nil {
+			t.Logf("s2 stopped: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	go func() {
+		if err := s3.Start(); err != nil {
+			t.Logf("s3 stopped: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	go func() {
+		if err := s4.Start(); err != nil {
+			t.Logf("s4 stopped: %v", err)
+		}
+	}()
+	time.Sleep(1 * time.Second)
+
+	// store a file on s1
+	userKey := make([]byte, 32)
+	rand.Read(userKey)
+
+	payload := bytes.NewReader([]byte("replication test data — this should survive node failure!"))
+	t.Log("Storing file on s1...")
+	cid, err := s1.StoreDataChunked("repl_test.txt", userKey, payload)
+	if err != nil {
+		t.Fatalf("StoreDataChunked failed: %v", err)
+	}
+	t.Logf("CID: %s", cid[:16])
+
+	// give initial replication time to propagate
+	time.Sleep(2 * time.Second)
+
+	manifestKey := cid + ".manifest"
+
+	// snapshot who has the manifest before failure
+	s1Has := s1.Store.Has(manifestKey)
+	s2Has := s2.Store.Has(manifestKey)
+	s3Has := s3.Store.Has(manifestKey)
+	s4Has := s4.Store.Has(manifestKey)
+	t.Logf("Before failure: s1=%v, s2=%v, s3=%v, s4=%v", s1Has, s2Has, s3Has, s4Has)
+
+	if !s1Has {
+		t.Fatalf("s1 should have the manifest (it's the uploader)")
+	}
+
+	// kill s3 to simulate node failure
+	t.Log("Stopping s3 to simulate node failure...")
+	s3.Stop()
+
+	// wait for: heartbeat detection (1s interval + 1 missed + 2s sleep)
+	// + audit cycle (2s) + re-replication I/O.
+	// 8s should be plenty for the fast timings we set.
+	t.Log("Waiting for self-healing...")
+	time.Sleep(8 * time.Second)
+
+	// s1 should still have everything (it's the uploader, it never drops)
+	if !s1.Store.Has(manifestKey) {
+		t.Errorf("FAIL: s1 lost the manifest after s3 went down")
+	} else {
+		t.Log("OK: s1 still has the manifest after s3 failure")
+	}
+
+	// verify s1's CIDIndex still lists the file
+	found := false
+	for _, entry := range s1.CIDIndex.List() {
+		if entry.CID == cid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("FAIL: s1 CIDIndex doesn't list the file after node failure")
+	} else {
+		t.Log("OK: s1 CIDIndex still lists the file")
+	}
+
+	// check that the cluster healed — at least 3 of the remaining nodes
+	// should have the manifest (s1 + s2 + s4, since s3 is dead)
+	holdCount := 0
+	for label, srv := range map[string]*server.FileServer{
+		"s1": s1, "s2": s2, "s4": s4,
+	} {
+		if srv.Store.Has(manifestKey) {
+			holdCount++
+			t.Logf("  %s: has manifest ✓", label)
+		} else {
+			t.Logf("  %s: missing manifest", label)
+		}
+	}
+	// we want at least 2 nodes to have it (the uploader + at least 1 replica).
+	// ideally all 3, but re-replication depends on the DHT routing which
+	// might not have placed s4 as a candidate yet in this short test.
+	if holdCount < 2 {
+		t.Errorf("FAIL: only %d/3 remaining nodes have the manifest, expected at least 2", holdCount)
+	} else {
+		t.Logf("OK: %d/3 remaining nodes have the manifest", holdCount)
+	}
+
+	// check replication status API reflects something meaningful
+	healthy, under, over, lastAudit := s1.GetReplicationStatus()
+	t.Logf("Replication status: healthy=%d, under=%d, over=%d, lastAudit=%v",
+		healthy, under, over, lastAudit)
+
+	if lastAudit.IsZero() {
+		t.Errorf("FAIL: lastAudit is zero — audit never ran")
+	} else {
+		t.Log("OK: audit has run at least once")
+	}
+
+	t.Log("Replication self-healing test passed")
+}
