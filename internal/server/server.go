@@ -41,6 +41,16 @@ type FileServer struct {
 	relayPeers    map[string]bool   // map of advertised addrs that are RelayOnly=true
 	pendingChunks sync.Map          // chunkKey --> chan struct{}, signals when a requested chunk arrives
 	CIDIndex      *storage.CIDIndex // local index mapping CID --> original filename
+
+	// replication health tracking
+	peerHealth       map[string]*PeerHealth // tracks heartbeat status per peer
+	healthLock       sync.Mutex             // guards peerHealth and audit result fields
+	auditLock        sync.Mutex             // prevents concurrent replication audits
+	pendingAudits    sync.Map               // auditID --> *pendingAudit, for collecting chunk holder responses
+	lastAuditHealthy int                    // chunks with exactly R replicas (from last audit)
+	lastAuditUnder   int                    // under-replicated chunks (from last audit)
+	lastAuditOver    int                    // over-replicated chunks (from last audit)
+	lastAuditTime    time.Time              // when the last audit finished
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
@@ -59,6 +69,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		addrMap:           make(map[string]string),
 		relayPeers:        make(map[string]bool),
 		CIDIndex:          storage.NewCIDIndex(options.RootDir),
+		peerHealth:        make(map[string]*PeerHealth),
 	}
 }
 
@@ -83,6 +94,7 @@ func (s *FileServer) handleMessage(from string, msg *Message) error {
 	case MessagePing:
 		return s.handlePing(from)
 	case MessagePong:
+		s.markPeerAlive(from)
 		return nil
 
 	// chunk + manifest handlers
@@ -104,6 +116,14 @@ func (s *FileServer) handleMessage(from string, msg *Message) error {
 		return s.handleDeleteFile(from, v)
 	case MessageTombstoneSync:
 		return s.handleTombstoneSync(from, v)
+
+	// replication protocol handlers
+	case MessageBatchChunkQuery:
+		return s.handleBatchChunkQuery(from, v)
+	case MessageBatchChunkResponse:
+		return s.handleBatchChunkResponse(from, v)
+	case MessageDropChunk:
+		return s.handleDropChunk(from, v)
 
 	default:
 		return fmt.Errorf("unknown message type: %T", msg.Payload)
@@ -870,7 +890,9 @@ func (s *FileServer) Start() error {
 
 	// Start background loops
 	go s.discoveryLoop()
-	go s.gcLoop() // GC for expired tombstones
+	go s.gcLoop()          // GC for expired tombstones
+	go s.heartbeatLoop()   // pings peers to detect failures
+	go s.replicationLoop() // checks chunk health and re-replicates if needed
 
 	s.loop()
 	return nil

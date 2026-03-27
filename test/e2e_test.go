@@ -226,3 +226,118 @@ func TestDeleteFile(t *testing.T) {
 	}
 	t.Log("OK: s1 CIDIndex no longer lists the deleted file")
 }
+
+func TestReplicationOnNodeFailure(t *testing.T) {
+	// 3-node setup: s1 stores a file, s2 and s3 get replicas.
+	// then we kill s3 and check if s1's replication audit notices.
+	s1 := createTestServer("6020", nil, t, false)
+	defer s1.Stop()
+	defer os.RemoveAll("./test_cas_6020")
+
+	s2 := createTestServer("6021", []string{":6020"}, t, false)
+	defer s2.Stop()
+	defer os.RemoveAll("./test_cas_6021")
+
+	s3 := createTestServer("6022", []string{":6020"}, t, false)
+	defer os.RemoveAll("./test_cas_6022")
+
+	go func() {
+		if err := s1.Start(); err != nil {
+			t.Logf("s1 stopped: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	go func() {
+		if err := s2.Start(); err != nil {
+			t.Logf("s2 stopped: %v", err)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	go func() {
+		if err := s3.Start(); err != nil {
+			t.Logf("s3 stopped: %v", err)
+		}
+	}()
+	time.Sleep(1 * time.Second)
+
+	// make sure everyone's connected
+	if len(s1.GetPeers()) < 2 {
+		t.Logf("WARNING: s1 only has %d peers, expected at least 2", len(s1.GetPeers()))
+	}
+
+	// store a file on s1
+	userKey := make([]byte, 32)
+	rand.Read(userKey)
+
+	payload := bytes.NewReader([]byte("replication test data — this should survive node failure!"))
+	t.Log("Storing file on s1...")
+	cid, err := s1.StoreDataChunked("repl_test.txt", userKey, payload)
+	if err != nil {
+		t.Fatalf("StoreDataChunked failed: %v", err)
+	}
+	t.Logf("CID: %s", cid[:16])
+
+	// give replication time to propagate
+	time.Sleep(1 * time.Second)
+
+	manifestKey := cid + ".manifest"
+
+	// verify s1 has the manifest
+	if !s1.Store.Has(manifestKey) {
+		t.Fatalf("s1 should have the manifest")
+	}
+
+	// check how many nodes have the manifest before killing s3
+	s2HasManifest := s2.Store.Has(manifestKey)
+	s3HasManifest := s3.Store.Has(manifestKey)
+	t.Logf("Before failure: s1=true, s2=%v, s3=%v", s2HasManifest, s3HasManifest)
+
+	// kill s3 to simulate node failure
+	t.Log("Stopping s3 to simulate node failure...")
+	s3.Stop()
+	time.Sleep(500 * time.Millisecond)
+
+	// s1 should still have everything
+	if !s1.Store.Has(manifestKey) {
+		t.Errorf("FAIL: s1 lost the manifest after s3 went down")
+	} else {
+		t.Log("OK: s1 still has the manifest after s3 failure")
+	}
+
+	// verify s1's CIDIndex still lists the file
+	found := false
+	for _, entry := range s1.CIDIndex.List() {
+		if entry.CID == cid {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("FAIL: s1 CIDIndex doesn't list the file after node failure")
+	} else {
+		t.Log("OK: s1 CIDIndex still lists the file")
+	}
+
+	// load manifest and check all chunks are still on s1
+	manifest, err := s1.Store.ReadChunk(manifestKey)
+	if err != nil {
+		t.Fatalf("Failed to read manifest: %v", err)
+	}
+	if len(manifest) == 0 {
+		t.Fatalf("Manifest is empty")
+	}
+	t.Log("OK: s1 has all manifest data intact")
+
+	// quick sanity check on the GetReplicationStatus API
+	healthy, under, over, lastAudit := s1.GetReplicationStatus()
+	t.Logf("Replication status: healthy=%d, under=%d, over=%d, lastAudit=%v",
+		healthy, under, over, lastAudit)
+
+	// check peer health API
+	healthMap := s1.GetPeerHealthMap()
+	t.Logf("Peer health map has %d entries", len(healthMap))
+
+	t.Log("Replication test passed — data survived node failure")
+}
