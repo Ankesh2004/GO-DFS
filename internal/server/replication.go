@@ -40,12 +40,17 @@ type PeerHealth struct {
 	MissedPings int
 }
 
+// holderSet is a set of advertise addresses that reported holding a chunk.
+// using map[string]struct{} instead of a slice so dedup is automatic.
+type holderSet map[string]struct{}
+
 // batchAudit collects batch responses from peers during one audit round.
-// each peer sends back a list of chunks they hold, and we merge them here.
+// each peer sends back which chunks they hold + their address, so we know
+// exactly WHO has each chunk — not just a count.
 type batchAudit struct {
-	mu         sync.Mutex
-	chunkCount map[string]int // chunkKey -> how many peers reported having it
-	done       chan struct{}  // closed when the collection window ends
+	mu      sync.Mutex
+	holders map[string]holderSet // chunkKey -> set of holder addresses
+	done    chan struct{}        // closed when the collection window ends
 }
 
 // -------- Heartbeat / Failure Detection --------
@@ -94,7 +99,6 @@ func (s *FileServer) runHeartbeat() {
 	}
 
 	// give peers a moment to respond, but respect shutdown signals.
-	// previous version did time.Sleep(2s) which blocked shutdown.
 	select {
 	case <-time.After(2 * time.Second):
 	case <-s.quitChannel:
@@ -246,7 +250,10 @@ func (s *FileServer) runReplicationAudit() {
 	}
 
 	// ---- Phase 1: collect all chunk keys from our manifests ----
+	// also build an ownership set so we don't have to re-read manifests
+	// later in handleOverReplication / handleDropChunk for each chunk.
 	var allChunks []string
+	ownedChunks := make(map[string]bool)
 	for _, entry := range entries {
 		manifestKey := entry.CID + ".manifest"
 		manifest, err := s.loadManifest(manifestKey)
@@ -256,6 +263,7 @@ func (s *FileServer) runReplicationAudit() {
 		for _, chunkKey := range manifest.ChunkKeys {
 			if !s.Tombstones.IsDead(chunkKey) {
 				allChunks = append(allChunks, chunkKey)
+				ownedChunks[chunkKey] = true
 			}
 		}
 	}
@@ -268,31 +276,30 @@ func (s *FileServer) runReplicationAudit() {
 		s.Transport.Addr(), len(allChunks), len(entries))
 
 	// ---- Phase 1b: send ONE batch query per peer, collect ALL responses ----
-	replicaCounts := s.batchAuditChunks(allChunks)
+	// now returns a map of chunkKey -> set of holder addresses, not just counts.
+	holderMap := s.batchAuditChunks(allChunks)
 
 	// ---- Phase 2: act on the results (no locks held) ----
 	underReplicated := 0
 	overReplicated := 0
 	healthy := 0
 
-	// collect actions to take, then execute them AFTER we're done counting.
-	// this separates counting from acting so we don't do network I/O
-	// in the middle of crunching numbers.
 	type chunkAction struct {
-		key   string
-		count int
+		key     string
+		holders holderSet
 	}
 	var underActions, overActions []chunkAction
 
 	for _, chunkKey := range allChunks {
-		count := replicaCounts[chunkKey]
+		holders := holderMap[chunkKey]
+		count := len(holders)
 		switch {
 		case count < ReplicaTarget:
 			underReplicated++
-			underActions = append(underActions, chunkAction{chunkKey, count})
+			underActions = append(underActions, chunkAction{chunkKey, holders})
 		case count > ReplicaTarget:
 			overReplicated++
-			overActions = append(overActions, chunkAction{chunkKey, count})
+			overActions = append(overActions, chunkAction{chunkKey, holders})
 		default:
 			healthy++
 		}
@@ -314,25 +321,25 @@ func (s *FileServer) runReplicationAudit() {
 	// now do the actual re-replication / cleanup.
 	// this is the slow part (network I/O), and it's completely outside any lock.
 	for _, a := range underActions {
-		s.handleUnderReplication(a.key, a.count)
+		s.handleUnderReplication(a.key, a.holders)
 	}
 	for _, a := range overActions {
-		s.handleOverReplication(a.key, a.count)
+		s.handleOverReplication(a.key, a.holders, ownedChunks)
 	}
 }
 
 // batchAuditChunks sends ONE query per peer with ALL chunk keys,
-// collects responses, and returns a map of chunkKey -> replica count.
+// collects responses, and returns a map of chunkKey -> set of holder addrs.
 // this replaces the old per-chunk auditChunkReplicas that was O(n × 3s).
 // now it's just ONE 3s timeout for the entire batch.
-func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]int {
+func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]holderSet {
 	idBytes := make([]byte, 8)
 	rand.Read(idBytes)
 	auditID := hex.EncodeToString(idBytes)
 
 	audit := &batchAudit{
-		chunkCount: make(map[string]int, len(chunkKeys)),
-		done:       make(chan struct{}),
+		holders: make(map[string]holderSet, len(chunkKeys)),
+		done:    make(chan struct{}),
 	}
 	s.pendingAudits.Store(auditID, audit)
 	defer s.pendingAudits.Delete(auditID)
@@ -340,7 +347,10 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]int {
 	// count ourselves — check which chunks we have locally
 	for _, ck := range chunkKeys {
 		if s.Store.Has(ck) {
-			audit.chunkCount[ck]++
+			if audit.holders[ck] == nil {
+				audit.holders[ck] = make(holderSet)
+			}
+			audit.holders[ck][s.AdvertiseAddr] = struct{}{}
 		}
 	}
 
@@ -375,9 +385,13 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]int {
 
 	// snapshot the results
 	audit.mu.Lock()
-	result := make(map[string]int, len(audit.chunkCount))
-	for k, v := range audit.chunkCount {
-		result[k] = v
+	result := make(map[string]holderSet, len(audit.holders))
+	for k, set := range audit.holders {
+		cp := make(holderSet, len(set))
+		for addr := range set {
+			cp[addr] = struct{}{}
+		}
+		result[k] = cp
 	}
 	audit.mu.Unlock()
 
@@ -387,21 +401,22 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]int {
 // -------- Under-Replication Handling --------
 
 // handleUnderReplication pushes a chunk to more nodes to reach ReplicaTarget.
-// picks the DHT-closest nodes that don't already have a copy.
-func (s *FileServer) handleUnderReplication(chunkKey string, currentCount int) {
+// now uses the actual holder set to skip nodes that already have the chunk
+// instead of blindly picking DHT-closest and hoping for the best.
+func (s *FileServer) handleUnderReplication(chunkKey string, holders holderSet) {
 	if !s.Store.Has(chunkKey) {
 		// we don't have the chunk ourselves — can't push what we don't have.
 		// another node that has it will handle the re-replication.
 		return
 	}
 
-	needed := ReplicaTarget - currentCount
+	needed := ReplicaTarget - len(holders)
 	if needed <= 0 {
 		return
 	}
 
 	fmt.Printf("[%s] Chunk %s under-replicated (%d/%d), need %d more copies\n",
-		s.Transport.Addr(), truncateKey(chunkKey, 16), currentCount, ReplicaTarget, needed)
+		s.Transport.Addr(), truncateKey(chunkKey, 16), len(holders), ReplicaTarget, needed)
 
 	targetID := dht.NewID(chunkKey)
 	candidates := s.DHT.NearestNodes(targetID, dht.K)
@@ -412,6 +427,10 @@ func (s *FileServer) handleUnderReplication(chunkKey string, currentCount int) {
 			break
 		}
 		if node.Addr == s.AdvertiseAddr || node.Addr == s.Transport.Addr() {
+			continue
+		}
+		// skip nodes that already have the chunk — we know from the audit
+		if _, alreadyHas := holders[node.Addr]; alreadyHas {
 			continue
 		}
 		s.peersLock.Lock()
@@ -438,20 +457,20 @@ func (s *FileServer) handleUnderReplication(chunkKey string, currentCount int) {
 	}
 }
 
-// handleOverReplication tells the furthest holders to drop the chunk.
-// "furthest" in DHT space = least responsible in Kademlia terms.
-func (s *FileServer) handleOverReplication(chunkKey string, currentCount int) {
-	excess := currentCount - ReplicaTarget
+// handleOverReplication tells the furthest actual holders to drop the chunk.
+// now targets ONLY nodes that reported having the chunk, sorted by DHT distance.
+// no more guessing — we send DropChunk only to confirmed holders.
+func (s *FileServer) handleOverReplication(chunkKey string, holders holderSet, ownedChunks map[string]bool) {
+	excess := len(holders) - ReplicaTarget
 	if excess <= 0 {
 		return
 	}
 
 	fmt.Printf("[%s] Chunk %s over-replicated (%d/%d), telling %d nodes to drop\n",
-		s.Transport.Addr(), truncateKey(chunkKey, 16), currentCount, ReplicaTarget, excess)
+		s.Transport.Addr(), truncateKey(chunkKey, 16), len(holders), ReplicaTarget, excess)
 
 	chunkTargetID := dht.NewID(chunkKey)
 	myDist := dht.Distance(s.ID, chunkTargetID)
-	allNodes := s.DHT.RoutingTable.GetAllNodes()
 
 	dropMsg := &Message{
 		Payload: MessageDropChunk{ChunkKey: chunkKey},
@@ -459,20 +478,29 @@ func (s *FileServer) handleOverReplication(chunkKey string, currentCount int) {
 
 	dropped := 0
 
-	// count how many nodes are closer to the chunk than us
-	closerCount := 0
-	for _, n := range allNodes {
-		if dht.Distance(n.ID, chunkTargetID).Cmp(myDist) < 0 {
-			closerCount++
+	// check if we ourselves should drop — only if we're far from the chunk
+	// AND enough closer holders exist AND we don't own the file.
+	closerHolderCount := 0
+	for addr := range holders {
+		if addr == s.AdvertiseAddr {
+			continue
+		}
+		// look up this holder's DHT ID from the routing table
+		allNodes := s.DHT.RoutingTable.GetAllNodes()
+		for _, n := range allNodes {
+			if n.Addr == addr {
+				if dht.Distance(n.ID, chunkTargetID).Cmp(myDist) < 0 {
+					closerHolderCount++
+				}
+				break
+			}
 		}
 	}
 
-	// if enough closer nodes exist, consider dropping our own copy.
-	// but NEVER drop if the chunk belongs to a file we uploaded.
-	if closerCount >= ReplicaTarget && s.Store.Has(chunkKey) && dropped < excess {
-		if !s.isOwnedChunk(chunkKey) {
-			fmt.Printf("[%s] Dropping our own copy of chunk %s (we're far from it, %d closer nodes exist)\n",
-				s.Transport.Addr(), truncateKey(chunkKey, 16), closerCount)
+	if closerHolderCount >= ReplicaTarget && s.Store.Has(chunkKey) && dropped < excess {
+		if !ownedChunks[chunkKey] {
+			fmt.Printf("[%s] Dropping our own copy of chunk %s (we're far from it, %d closer holders exist)\n",
+				s.Transport.Addr(), truncateKey(chunkKey, 16), closerHolderCount)
 			if err := s.Store.DeleteStream(chunkKey); err != nil {
 				fmt.Printf("[%s] Failed to drop our chunk %s: %v\n",
 					s.Transport.Addr(), truncateKey(chunkKey, 16), err)
@@ -485,19 +513,27 @@ func (s *FileServer) handleOverReplication(chunkKey string, currentCount int) {
 		}
 	}
 
-	// tell further peers to drop if still needed
+	// tell other confirmed holders to drop — pick the furthest ones first.
+	// only send to addrs that are in the holder set, not just any routing table entry.
 	if dropped < excess {
-		for _, n := range allNodes {
+		for addr := range holders {
 			if dropped >= excess {
 				break
 			}
-			if n.Addr == s.AdvertiseAddr || n.Addr == s.Transport.Addr() {
+			if addr == s.AdvertiseAddr || addr == s.Transport.Addr() {
 				continue
 			}
-			nodeDist := dht.Distance(n.ID, chunkTargetID)
-			if nodeDist.Cmp(myDist) > 0 {
-				if err := s.sendToAddr(n.Addr, dropMsg); err == nil {
-					dropped++
+			// confirm they're further from the chunk than us
+			allNodes := s.DHT.RoutingTable.GetAllNodes()
+			for _, n := range allNodes {
+				if n.Addr == addr {
+					nodeDist := dht.Distance(n.ID, chunkTargetID)
+					if nodeDist.Cmp(myDist) > 0 {
+						if err := s.sendToAddr(addr, dropMsg); err == nil {
+							dropped++
+						}
+					}
+					break
 				}
 			}
 		}
@@ -505,7 +541,7 @@ func (s *FileServer) handleOverReplication(chunkKey string, currentCount int) {
 }
 
 // isOwnedChunk checks if a chunk belongs to any file in our CIDIndex.
-// extracted so both handleOverReplication and handleDropChunk can use it.
+// extracted so handleDropChunk can use it.
 func (s *FileServer) isOwnedChunk(chunkKey string) bool {
 	entries := s.CIDIndex.List()
 	for _, e := range entries {
@@ -557,6 +593,7 @@ func (s *FileServer) handleBatchChunkQuery(from string, msg MessageBatchChunkQue
 }
 
 // handleBatchChunkResponse merges a peer's batch response into our audit state.
+// now records the actual holder address per chunk instead of just incrementing a counter.
 func (s *FileServer) handleBatchChunkResponse(_ string, msg MessageBatchChunkResponse) error {
 	val, ok := s.pendingAudits.Load(msg.AuditID)
 	if !ok {
@@ -574,7 +611,10 @@ func (s *FileServer) handleBatchChunkResponse(_ string, msg MessageBatchChunkRes
 
 	audit.mu.Lock()
 	for _, ck := range msg.HeldChunks {
-		audit.chunkCount[ck]++
+		if audit.holders[ck] == nil {
+			audit.holders[ck] = make(holderSet)
+		}
+		audit.holders[ck][msg.HolderAddr] = struct{}{}
 	}
 	audit.mu.Unlock()
 
