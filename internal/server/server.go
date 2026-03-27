@@ -46,11 +46,18 @@ type FileServer struct {
 	peerHealth       map[string]*PeerHealth // tracks heartbeat status per peer
 	healthLock       sync.Mutex             // guards peerHealth and audit result fields
 	auditLock        sync.Mutex             // prevents concurrent replication audits
-	pendingAudits    sync.Map               // auditID --> *pendingAudit, for collecting chunk holder responses
+	pendingAudits    sync.Map               // auditID --> *batchAudit, for collecting chunk holder responses
 	lastAuditHealthy int                    // chunks with exactly R replicas (from last audit)
 	lastAuditUnder   int                    // under-replicated chunks (from last audit)
 	lastAuditOver    int                    // over-replicated chunks (from last audit)
 	lastAuditTime    time.Time              // when the last audit finished
+
+	// configurable timing — defaults are set in NewFileServer,
+	// but tests can override these before calling Start().
+	HeartbeatInterval time.Duration
+	FailureThreshold  int
+	AuditInterval     time.Duration
+	AuditTimeout      time.Duration
 }
 
 func NewFileServer(options FileServerOptions) *FileServer {
@@ -70,6 +77,10 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		relayPeers:        make(map[string]bool),
 		CIDIndex:          storage.NewCIDIndex(options.RootDir),
 		peerHealth:        make(map[string]*PeerHealth),
+		HeartbeatInterval: DefaultHeartbeatInterval,
+		FailureThreshold:  DefaultFailureThreshold,
+		AuditInterval:     DefaultAuditInterval,
+		AuditTimeout:      DefaultAuditTimeout,
 	}
 }
 

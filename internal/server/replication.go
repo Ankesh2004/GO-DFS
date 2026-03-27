@@ -16,20 +16,14 @@ import (
 // R is about data durability. keeping it small to save bandwidth.
 const ReplicaTarget = 3
 
-// heartbeat timing — 15s interval, 3 misses = dead.
-// aggressive enough to catch crashes quickly, chill enough
-// to not spam the network with pings on every breath.
+// defaults for heartbeat and audit timing. these get copied into
+// each FileServer at creation, but can be overridden before Start()
+// to speed up tests without making production wait forever.
 const (
-	HeartbeatInterval = 15 * time.Second
-	FailureThreshold  = 3
-)
-
-// how often we scan our local manifests and check if chunks are healthy.
-// 60s is a decent balance — fast enough to catch issues, slow enough
-// to not turn the network into a constant audit firehose.
-const (
-	AuditInterval = 60 * time.Second
-	AuditTimeout  = 3 * time.Second // max wait for peer batch responses
+	DefaultHeartbeatInterval = 15 * time.Second
+	DefaultFailureThreshold  = 3
+	DefaultAuditInterval     = 60 * time.Second
+	DefaultAuditTimeout      = 3 * time.Second
 )
 
 // PeerHealth tracks whether a peer is alive or ghosting us.
@@ -59,7 +53,7 @@ type batchAudit struct {
 // if a peer misses too many pongs in a row, we kick them out
 // and immediately trigger a replication audit to patch any holes.
 func (s *FileServer) heartbeatLoop() {
-	ticker := time.NewTicker(HeartbeatInterval)
+	ticker := time.NewTicker(s.HeartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -121,13 +115,13 @@ func (s *FileServer) runHeartbeat() {
 
 		// if they responded, handlePong already reset missedPings.
 		// if they didn't, bump the counter.
-		if time.Since(health.LastSeen) > HeartbeatInterval {
+		if time.Since(health.LastSeen) > s.HeartbeatInterval {
 			health.MissedPings++
-			if health.MissedPings >= FailureThreshold {
+			if health.MissedPings >= s.FailureThreshold {
 				deadPeers = append(deadPeers, entry.addr)
 			} else {
 				fmt.Printf("[%s] Heartbeat: peer %s missed %d/%d pings\n",
-					s.Transport.Addr(), entry.addr, health.MissedPings, FailureThreshold)
+					s.Transport.Addr(), entry.addr, health.MissedPings, s.FailureThreshold)
 			}
 		}
 	}
@@ -168,7 +162,7 @@ func (s *FileServer) markPeerAlive(addr string) {
 // our worldview until they reconnect and do PeerExchange again.
 func (s *FileServer) evictDeadPeer(addr string) {
 	fmt.Printf("[%s] EVICTING dead peer: %s (missed %d heartbeats)\n",
-		s.Transport.Addr(), addr, FailureThreshold)
+		s.Transport.Addr(), addr, s.FailureThreshold)
 
 	s.peersLock.Lock()
 	// close the TCP connection so the read-loop goroutine exits cleanly
@@ -207,7 +201,7 @@ func (s *FileServer) evictDeadPeer(addr string) {
 // replicationLoop runs every AuditInterval and checks if our locally
 // known chunks have enough replicas across the network.
 func (s *FileServer) replicationLoop() {
-	ticker := time.NewTicker(AuditInterval)
+	ticker := time.NewTicker(s.AuditInterval)
 	defer ticker.Stop()
 
 	for {
@@ -384,7 +378,7 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]holderSet {
 
 	// single timeout for ALL responses — not per-chunk anymore!
 	select {
-	case <-time.After(AuditTimeout):
+	case <-time.After(s.AuditTimeout):
 	case <-s.quitChannel:
 	}
 	close(audit.done)
