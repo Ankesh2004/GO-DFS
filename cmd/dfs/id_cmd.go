@@ -31,6 +31,16 @@ func runID() {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errEnv struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errEnv); err == nil && errEnv.Error != "" {
+			fatalf("API error from %s: %s", apiURL("id"), errEnv.Error)
+		}
+		fatalf("API error from %s: status %d", apiURL("id"), resp.StatusCode)
+	}
+
 	var result struct {
 		NodeID        string `json:"nodeID"`
 		AdvertiseAddr string `json:"advertiseAddr"`
