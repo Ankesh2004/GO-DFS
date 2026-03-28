@@ -1,0 +1,327 @@
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
+)
+
+// APIServer is the localhost HTTP control API for the running node.
+// CLI commands hit this to interact with the mesh without being a node themselves.
+type APIServer struct {
+	fileServer *FileServer
+	userKey    []byte // loaded once at startup, held in memory
+	httpServer *http.Server
+}
+
+// StartAPI fires up the HTTP control API on the given address.
+// addr should be something like ":9000" — we force-bind to 127.0.0.1
+// so it's never exposed to the network. the encryption key is loaded
+// from keyPath and kept in memory for put/get operations.
+func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
+	userKey, err := crypto.LoadOrGenerateKey(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load encryption key from %s: %w", keyPath, err)
+	}
+
+	api := &APIServer{
+		fileServer: s,
+		userKey:    userKey,
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/put", api.handlePut)
+	mux.HandleFunc("/api/get/", api.handleGet)
+	mux.HandleFunc("/api/ls", api.handleList)
+	mux.HandleFunc("/api/rm/", api.handleDelete)
+	mux.HandleFunc("/api/peers", api.handlePeers)
+	mux.HandleFunc("/api/status", api.handleStatus)
+	mux.HandleFunc("/api/id", api.handleID)
+
+	// force localhost binding - this API should NEVER be reachable from outside
+	listenAddr := addr
+	if !strings.Contains(listenAddr, ":") {
+		listenAddr = ":" + listenAddr
+	}
+	host, port, _ := net.SplitHostPort(listenAddr)
+	if host == "" || host == "0.0.0.0" {
+		listenAddr = "127.0.0.1:" + port
+	}
+
+	api.httpServer = &http.Server{
+		Addr:         listenAddr,
+		Handler:      mux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second, // file transfers can be slow
+	}
+
+	go func() {
+		fmt.Printf("[API] Control API listening on http://%s\n", listenAddr)
+		if err := api.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("[API] HTTP server error: %v\n", err)
+		}
+	}()
+
+	return api, nil
+}
+
+// jsonReply is a tiny helper to send JSON responses without repeating ourselves.
+func jsonReply(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+// jsonError sends a JSON error response.
+func jsonError(w http.ResponseWriter, status int, msg string) {
+	jsonReply(w, status, map[string]string{"error": msg})
+}
+
+// -------- PUT --------
+
+// handlePut accepts a multipart file upload, encrypts it, chunks it,
+// stores it in the mesh, and returns the CID.
+func (api *APIServer) handlePut(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+
+	// 64MB max memory for multipart parsing — bigger files stream to disk
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid multipart form: %v", err))
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("missing 'file' field: %v", err))
+		return
+	}
+	defer file.Close()
+
+	originalName := header.Filename
+	if originalName == "" {
+		originalName = "unnamed"
+	}
+
+	cid, err := api.fileServer.StoreDataChunked(originalName, api.userKey, file)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("store failed: %v", err))
+		return
+	}
+
+	// grab the entry we just stored for size + chunk info
+	entries := api.fileServer.CIDIndex.List()
+	var size int64
+	var chunkCount int
+	for _, e := range entries {
+		if e.CID == cid {
+			size = e.Size
+			chunkCount = e.ChunkCount
+			break
+		}
+	}
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"cid":        cid,
+		"name":       originalName,
+		"size":       size,
+		"chunkCount": chunkCount,
+	})
+}
+
+// -------- GET --------
+
+// handleGet retrieves a file by CID, decrypts it, and streams back the raw bytes.
+// the client can save it to whatever filename it wants.
+func (api *APIServer) handleGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+
+	// extract CID from URL: /api/get/<CID>
+	cid := strings.TrimPrefix(r.URL.Path, "/api/get/")
+	if cid == "" {
+		jsonError(w, http.StatusBadRequest, "missing CID in URL")
+		return
+	}
+
+	reader, err := api.fileServer.GetFileChunked(cid)
+	if err != nil {
+		jsonError(w, http.StatusNotFound, fmt.Sprintf("file not found: %v", err))
+		return
+	}
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	// decrypt the stream
+	decryptedBuf := new(bytes.Buffer)
+	if err := DecryptStream(api.userKey, reader, decryptedBuf); err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("decryption failed: %v", err))
+		return
+	}
+
+	// figure out the original filename from the CID index
+	filename := cid
+	entries := api.fileServer.CIDIndex.List()
+	for _, e := range entries {
+		if e.CID == cid {
+			filename = e.OriginalName
+			break
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("X-Original-Name", filename)
+	w.WriteHeader(http.StatusOK)
+	io.Copy(w, decryptedBuf)
+}
+
+// -------- LS --------
+
+// handleList returns all files stored by this node as a JSON array.
+func (api *APIServer) handleList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+
+	entries := api.fileServer.CIDIndex.List()
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"files": entries,
+		"count": len(entries),
+	})
+}
+
+// -------- RM --------
+
+// handleDelete tombstones a file and broadcasts deletion to the network.
+func (api *APIServer) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		jsonError(w, http.StatusMethodNotAllowed, "use DELETE")
+		return
+	}
+
+	cid := strings.TrimPrefix(r.URL.Path, "/api/rm/")
+	if cid == "" {
+		jsonError(w, http.StatusBadRequest, "missing CID in URL")
+		return
+	}
+
+	if err := api.fileServer.DeleteFile(cid); err != nil {
+		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("delete failed: %v", err))
+		return
+	}
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"ok":  true,
+		"cid": cid,
+	})
+}
+
+// -------- PEERS --------
+
+// handlePeers returns the list of currently connected peers.
+func (api *APIServer) handlePeers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+
+	peers := api.fileServer.GetPeers()
+	addrs := make([]string, 0, len(peers))
+	for addr := range peers {
+		addrs = append(addrs, addr)
+	}
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"count": len(addrs),
+		"peers": addrs,
+	})
+}
+
+// -------- STATUS --------
+
+// handleStatus returns peer health and replication audit results.
+func (api *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+
+	// peer health
+	healthMap := api.fileServer.GetPeerHealthMap()
+	peerHealth := make([]map[string]any, 0, len(healthMap))
+	for addr, h := range healthMap {
+		status := "HEALTHY"
+		if h.MissedPings > 0 {
+			status = fmt.Sprintf("WARNING (%d missed)", h.MissedPings)
+		}
+		peerHealth = append(peerHealth, map[string]any{
+			"addr":        addr,
+			"status":      status,
+			"lastSeen":    h.LastSeen.Format(time.RFC3339),
+			"missedPings": h.MissedPings,
+		})
+	}
+
+	// replication
+	healthy, under, over, lastAudit := api.fileServer.GetReplicationStatus()
+	replication := map[string]any{
+		"healthy":         healthy,
+		"underReplicated": under,
+		"overReplicated":  over,
+	}
+	if !lastAudit.IsZero() {
+		replication["lastAudit"] = lastAudit.Format(time.RFC3339)
+	}
+
+	// file count
+	entries := api.fileServer.CIDIndex.List()
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"peerHealth":  peerHealth,
+		"replication": replication,
+		"storedFiles": len(entries),
+	})
+}
+
+// -------- ID --------
+
+// handleID returns the node's identity info.
+func (api *APIServer) handleID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+
+	// figure out the key path for display — it's just cosmetic
+	keyPath := filepath.Join(api.fileServer.RootDir, "myKey.key")
+	keyExists := false
+	if _, err := os.Stat(keyPath); err == nil {
+		keyExists = true
+	}
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"nodeID":        api.fileServer.ID.String(),
+		"advertiseAddr": api.fileServer.AdvertiseAddr,
+		"listenAddr":    api.fileServer.Transport.Addr(),
+		"dataDir":       api.fileServer.RootDir,
+		"relayOnly":     api.fileServer.RelayOnly,
+		"keyLoaded":     keyExists,
+	})
+}
