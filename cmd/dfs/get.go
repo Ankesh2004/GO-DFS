@@ -52,14 +52,34 @@ func runGet(cid string) {
 	if savePath == "" {
 		// use the original filename from the header
 		origName := resp.Header.Get("X-Original-Name")
-		if origName == "" {
-			origName = cid // fallback to CID if no name found
+		if origName != "" {
+			// sanitize the path to prevent directory traversal (take base name)
+			origName = filepath.Base(filepath.Clean(origName))
+			if origName == "." || origName == "/" || origName == "\\" {
+				origName = ""
+			}
 		}
+		if origName == "" {
+			origName = cid // fallback to CID if no valid name found
+		}
+
 		destDir := "myFiles"
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			fatalf("could not create directory: %v", err)
 		}
 		savePath = filepath.Join(destDir, origName)
+
+		// ensure the final path remains inside destDir (double defense)
+		absDest, err1 := filepath.Abs(destDir)
+		absSave, err2 := filepath.Abs(savePath)
+		if err1 == nil && err2 == nil {
+			// ensure absSave starts with absDest + separator
+			prefix := absDest + string(filepath.Separator)
+			if len(absSave) <= len(absDest) || absSave[:len(prefix)] != prefix {
+				// validation failed, fallback to secure CID path
+				savePath = filepath.Join(destDir, cid)
+			}
+		}
 	}
 
 	// make sure the parent directory exists
