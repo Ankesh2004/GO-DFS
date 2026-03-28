@@ -31,6 +31,16 @@ func runPeers() {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		var errEnv struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errEnv); err == nil && errEnv.Error != "" {
+			fatalf("API error from %s: %s", apiURL("peers"), errEnv.Error)
+		}
+		fatalf("API error from %s: status %d", apiURL("peers"), resp.StatusCode)
+	}
+
 	var result struct {
 		Count int      `json:"count"`
 		Peers []string `json:"peers"`
