@@ -33,3 +33,7 @@ cas7000
 cas7001
 myFiles/
 *.key
+*.id
+*.json
+*.pem
+*.crt
