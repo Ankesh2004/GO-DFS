@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,6 +25,7 @@ var (
 	nodeID        string
 	nodeRelay     bool
 	nodeAPIPort   string
+	nodeInteractive bool
 )
 
 // nodeCmd is the parent for `dfs node <subcommand>`
@@ -53,6 +57,7 @@ func init() {
 	nodeStartCmd.Flags().StringVar(&nodeID, "id", "", "override node identity string")
 	nodeStartCmd.Flags().BoolVar(&nodeRelay, "relay", false, "relay-only mode (no local storage)")
 	nodeStartCmd.Flags().StringVar(&nodeAPIPort, "api-port", ":9000", "HTTP control API port (localhost only)")
+	nodeStartCmd.Flags().BoolVarP(&nodeInteractive, "interactive", "i", false, "start the interactive REPL alongside the node")
 
 	nodeCmd.AddCommand(nodeStartCmd)
 	rootCmd.AddCommand(nodeCmd)
@@ -144,11 +149,18 @@ func runNodeDaemon() {
 
 	time.Sleep(1 * time.Second)
 
-	// 7. drop into the interactive REPL so existing users feel at home.
-	//    the REPL and the HTTP API run side by side — you can use either.
-	keyBytes, err := loadKeyFromPath(keyPath)
-	if err != nil {
-		log.Fatalf("Fatal: user key failure: %v", err)
+	// 7. run headlessly or with REPL
+	if nodeInteractive {
+		keyBytes, err := loadKeyFromPath(keyPath)
+		if err != nil {
+			log.Fatalf("Fatal: user key failure: %v", err)
+		}
+		commandLoop(s, keyBytes)
+	} else {
+		// block until OS signal
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+		fmt.Println("\nReceived termination signal. Shutting down daemon...")
 	}
-	commandLoop(s, keyBytes)
 }

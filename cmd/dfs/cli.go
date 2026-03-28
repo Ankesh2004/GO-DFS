@@ -58,7 +58,15 @@ func commandLoop(s *server.FileServer, userKey []byte) {
 
 	for {
 		fmt.Print("\ndfs> ")
-		input, _ := reader.ReadString('\n')
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				fmt.Println("\nExiting interactive mode...")
+				return
+			}
+			fmt.Printf("\nError reading input: %v\n", err)
+			return
+		}
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
