@@ -64,9 +64,14 @@ func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
 		WriteTimeout: 60 * time.Second, // file transfers can be slow
 	}
 
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind API on %s: %w", listenAddr, err)
+	}
+
 	go func() {
 		fmt.Printf("[API] Control API listening on http://%s\n", listenAddr)
-		if err := api.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := api.httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("[API] HTTP server error: %v\n", err)
 		}
 	}()
