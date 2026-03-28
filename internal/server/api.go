@@ -101,6 +101,9 @@ func (api *APIServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid multipart form: %v", err))
 		return
 	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
