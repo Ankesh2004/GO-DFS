@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 type APIServer struct {
 	fileServer *FileServer
 	userKey    []byte // loaded once at startup, held in memory
+	keyPath    string // path to the loaded encryption key
 	httpServer *http.Server
 }
 
@@ -35,6 +35,7 @@ func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
 	api := &APIServer{
 		fileServer: s,
 		userKey:    userKey,
+		keyPath:    keyPath,
 	}
 
 	mux := http.NewServeMux()
@@ -331,10 +332,9 @@ func (api *APIServer) handleID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// figure out the key path for display — it's just cosmetic
-	keyPath := filepath.Join(api.fileServer.RootDir, "myKey.key")
+	// figure out if the exact key path we loaded still exists
 	keyExists := false
-	if _, err := os.Stat(keyPath); err == nil {
+	if _, err := os.Stat(api.keyPath); err == nil {
 		keyExists = true
 	}
 
