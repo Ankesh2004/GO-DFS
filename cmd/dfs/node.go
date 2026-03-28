@@ -115,8 +115,12 @@ func runNodeDaemon() {
 		RelayOnly:      nodeRelay,
 	})
 	transport.OnPeer = s.OnPeer
-
-	fmt.Printf("Node ID    : %s\n", s.ID.String()[:16])
+	// display first 16 only for clean display
+	displayID := s.ID.String()
+	if len(displayID) > 16 {
+		displayID = displayID[:16]
+	}
+	fmt.Printf("Node ID    : %s\n", displayID)
 	fmt.Printf("Listen     : %s\n", nodePort)
 	fmt.Printf("Advertise  : %s\n", advertise)
 	fmt.Printf("Data Dir   : %s\n", dataDir)
