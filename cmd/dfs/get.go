@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 
@@ -35,7 +34,8 @@ func init() {
 func runGet(cid string) {
 	fmt.Printf("Retrieving CID: %s...\n", cid)
 
-	resp, err := http.Get(apiURL("get/" + cid))
+	client := newCLIHTTPClient()
+	resp, err := client.Get(apiURL("get/" + cid))
 	if err != nil {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
 	}

@@ -25,7 +25,8 @@ func init() {
 }
 
 func runPeers() {
-	resp, err := http.Get(apiURL("peers"))
+	client := newCLIHTTPClient()
+	resp, err := client.Get(apiURL("peers"))
 	if err != nil {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
 	}

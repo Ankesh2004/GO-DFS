@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
 )
@@ -24,4 +26,12 @@ func apiURL(endpoint string) string {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// newCLIHTTPClient returns a timeout-bound HTTP client (matching the 5s DHT discovery timeout)
+// used by the CLI subcommands (id, peers, get, etc.) to prevent hanging if the daemon is unresponsive.
+func newCLIHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+	}
 }

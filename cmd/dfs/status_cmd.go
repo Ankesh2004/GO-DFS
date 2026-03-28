@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 
 	"github.com/spf13/cobra"
 )
@@ -25,7 +24,8 @@ func init() {
 }
 
 func runStatus() {
-	resp, err := http.Get(apiURL("status"))
+	client := newCLIHTTPClient()
+	resp, err := client.Get(apiURL("status"))
 	if err != nil {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
 	}
