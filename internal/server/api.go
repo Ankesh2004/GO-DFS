@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -147,6 +146,20 @@ func (api *APIServer) handlePut(w http.ResponseWriter, r *http.Request) {
 
 // handleGet retrieves a file by CID, decrypts it, and streams back the raw bytes.
 // the client can save it to whatever filename it wants.
+
+type responseStreamer struct {
+	w     http.ResponseWriter
+	wrote bool
+}
+
+func (rs *responseStreamer) Write(p []byte) (int, error) {
+	if !rs.wrote {
+		rs.wrote = true
+		rs.w.WriteHeader(http.StatusOK)
+	}
+	return rs.w.Write(p)
+}
+
 func (api *APIServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "use GET")
@@ -169,13 +182,6 @@ func (api *APIServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		defer closer.Close()
 	}
 
-	// decrypt the stream
-	decryptedBuf := new(bytes.Buffer)
-	if err := DecryptStream(api.userKey, reader, decryptedBuf); err != nil {
-		jsonError(w, http.StatusInternalServerError, fmt.Sprintf("decryption failed: %v", err))
-		return
-	}
-
 	// figure out the original filename from the CID index
 	filename := cid
 	entries := api.fileServer.CIDIndex.List()
@@ -189,8 +195,21 @@ func (api *APIServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.Header().Set("X-Original-Name", filename)
-	w.WriteHeader(http.StatusOK)
-	io.Copy(w, decryptedBuf)
+
+	// stream decryption directly to the response
+	streamer := &responseStreamer{w: w}
+	if err := DecryptStream(api.userKey, reader, streamer); err != nil {
+		if !streamer.wrote {
+			// clean up headers since we're pivoting to a JSON error
+			w.Header().Del("Content-Type")
+			w.Header().Del("Content-Disposition")
+			w.Header().Del("X-Original-Name")
+			jsonError(w, http.StatusInternalServerError, fmt.Sprintf("decryption failed: %v", err))
+		} else {
+			// HTTP status and partial body already sent; gracefully abort
+			fmt.Printf("[API] Streaming decryption error for CID %s: %v\n", cid, err)
+		}
+	}
 }
 
 // -------- LS --------
