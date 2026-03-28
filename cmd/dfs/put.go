@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -50,20 +49,35 @@ func runPut(filePath string) {
 
 	fmt.Printf("Uploading '%s' (%d bytes)...\n", stat.Name(), stat.Size())
 
-	// build multipart request
-	body := new(bytes.Buffer)
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
-		fatalf("failed to create form: %v", err)
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		fatalf("failed to read file: %v", err)
-	}
-	writer.Close()
+	// build multipart request iteratively via an io.Pipe to prevent OOM on large files
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	go func() {
+		defer pw.Close()
+		part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if err := writer.Close(); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+	}()
 
 	// POST to the control API
-	resp, err := http.Post(apiURL("put"), writer.FormDataContentType(), body)
+	req, err := http.NewRequest(http.MethodPost, apiURL("put"), pr)
+	if err != nil {
+		fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
 	}
