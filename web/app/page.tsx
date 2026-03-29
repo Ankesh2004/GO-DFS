@@ -10,7 +10,7 @@ import { Navbar } from "@/components/landing/navbar"
 
 export default function HomePage() {
   return (
-    <main className="min-h-screen bg-background">
+    <main className="min-h-screen w-full overflow-x-hidden bg-background">
       <Navbar />
       <Hero />
       <Features />
