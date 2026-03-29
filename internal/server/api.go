@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,12 +249,15 @@ func (api *APIServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		defer closer.Close()
 	}
 
-	// figure out the original filename from the CID index
+	// figure out the original filename and file size from the CID index
 	filename := cid
+	var fileSize int64 = -1
+
 	entries := api.fileServer.CIDIndex.List()
 	for _, e := range entries {
 		if e.CID == cid {
 			filename = e.OriginalName
+			fileSize = e.Size
 			break
 		}
 	}
@@ -261,6 +265,9 @@ func (api *APIServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.Header().Set("X-Original-Name", filename)
+	if fileSize >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+	}
 
 	// stream decryption directly to the response
 	streamer := &responseStreamer{w: w}
