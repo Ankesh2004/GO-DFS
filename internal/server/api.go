@@ -404,18 +404,18 @@ func (api *APIServer) handleID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// figure out if the exact key path we loaded still exists
-	keyExists := false
+	keyFilePresent := false
 	if _, err := os.Stat(api.keyPath); err == nil {
-		keyExists = true
+		keyFilePresent = true
 	}
 
 	jsonReply(w, http.StatusOK, map[string]any{
-		"nodeID":        api.fileServer.ID.String(),
-		"advertiseAddr": api.fileServer.AdvertiseAddr,
-		"listenAddr":    api.fileServer.Transport.Addr(),
-		"dataDir":       api.fileServer.RootDir,
-		"relayOnly":     api.fileServer.RelayOnly,
-		"keyLoaded":     keyExists,
+		"nodeID":         api.fileServer.ID.String(),
+		"advertiseAddr":  api.fileServer.AdvertiseAddr,
+		"listenAddr":     api.fileServer.Transport.Addr(),
+		"dataDir":        api.fileServer.RootDir,
+		"relayOnly":      api.fileServer.RelayOnly,
+		"keyLoaded":      len(api.userKey) > 0,
+		"keyFilePresent": keyFilePresent,
 	})
 }
