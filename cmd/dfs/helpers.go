@@ -68,3 +68,11 @@ func newCLIHTTPClient() *http.Client {
 		Transport: &authTransport{rt: http.DefaultTransport, token: resolveAPIToken()},
 	}
 }
+
+// newCLIStreamingClient returns an HTTP client specifically tuned for large file transfers (get, put).
+// It has NO absolute timeout blocking the connection, preventing 5s crashes during multi-GB file uploads/downloads.
+func newCLIStreamingClient() *http.Client {
+	return &http.Client{
+		Transport: &authTransport{rt: http.DefaultTransport, token: resolveAPIToken()},
+	}
+}

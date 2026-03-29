@@ -76,11 +76,9 @@ func runPut(filePath string) {
 		fatalf("failed to build request: %v", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	if token := resolveAPIToken(); token != "" {
-		req.Header.Set("X-Local-Auth", token)
-	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := newCLIStreamingClient()
+	resp, err := client.Do(req)
 	if err != nil {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
 	}

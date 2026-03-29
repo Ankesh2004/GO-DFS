@@ -34,7 +34,7 @@ func init() {
 func runGet(cid string) {
 	fmt.Printf("Retrieving CID: %s...\n", cid)
 
-	client := newCLIHTTPClient()
+	client := newCLIStreamingClient()
 	resp, err := client.Get(apiURL("get/" + cid))
 	if err != nil {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
