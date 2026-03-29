@@ -1,12 +1,15 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,14 +41,42 @@ func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
 		keyPath:    keyPath,
 	}
 
+	// Generate or load a secure API token for local auth
+	tokenPath := filepath.Join(s.RootDir, "api_token")
+	var apiToken string
+	if b, err := os.ReadFile(tokenPath); err == nil {
+		apiToken = strings.TrimSpace(string(b))
+	} else {
+		tokenBytes := make([]byte, 32)
+		rand.Read(tokenBytes)
+		apiToken = hex.EncodeToString(tokenBytes)
+		os.WriteFile(tokenPath, []byte(apiToken), 0600)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/put", api.handlePut)
-	mux.HandleFunc("/api/get/", api.handleGet)
-	mux.HandleFunc("/api/ls", api.handleList)
-	mux.HandleFunc("/api/rm/", api.handleDelete)
-	mux.HandleFunc("/api/peers", api.handlePeers)
-	mux.HandleFunc("/api/status", api.handleStatus)
-	mux.HandleFunc("/api/id", api.handleID)
+
+	// local daemon security middleware
+	authMiddleware := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			token := r.Header.Get("X-Local-Auth")
+			if token == "" {
+				token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			}
+			if token != apiToken {
+				jsonError(w, http.StatusUnauthorized, "invalid or missing control API auth token ("+tokenPath+")")
+				return
+			}
+			next(w, r)
+		}
+	}
+
+	mux.HandleFunc("/api/put", authMiddleware(api.handlePut))
+	mux.HandleFunc("/api/get/", authMiddleware(api.handleGet))
+	mux.HandleFunc("/api/ls", authMiddleware(api.handleList))
+	mux.HandleFunc("/api/rm/", authMiddleware(api.handleDelete))
+	mux.HandleFunc("/api/peers", authMiddleware(api.handlePeers))
+	mux.HandleFunc("/api/status", authMiddleware(api.handleStatus))
+	mux.HandleFunc("/api/id", authMiddleware(api.handleID))
 
 	// force localhost binding - this API should NEVER be reachable from outside
 	listenAddr := addr

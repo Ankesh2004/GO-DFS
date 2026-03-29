@@ -76,6 +76,9 @@ func runPut(filePath string) {
 		fatalf("failed to build request: %v", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if token := resolveAPIToken(); token != "" {
+		req.Header.Set("X-Local-Auth", token)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

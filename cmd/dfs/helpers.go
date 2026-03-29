@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
@@ -28,10 +30,41 @@ func fatalf(format string, args ...any) {
 	os.Exit(1)
 }
 
+// resolveAPIToken attempts to grab the control API token from flags or local cas_* dirs.
+// it allows thin CLI commands to work magically without passing --api-token manually,
+// as long as they are run in the same directory where a GO-DFS node is operating.
+func resolveAPIToken() string {
+	if apiToken != "" {
+		return apiToken
+	}
+	matches, _ := filepath.Glob("cas_*/api_token")
+	if len(matches) == 1 {
+		b, err := os.ReadFile(matches[0])
+		if err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
+
+// authTransport is an http.RoundTripper that automatically sets the local security token.
+type authTransport struct {
+	rt    http.RoundTripper
+	token string
+}
+
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.token != "" {
+		req.Header.Set("X-Local-Auth", t.token)
+	}
+	return t.rt.RoundTrip(req)
+}
+
 // newCLIHTTPClient returns a timeout-bound HTTP client (matching the 5s DHT discovery timeout)
 // used by the CLI subcommands (id, peers, get, etc.) to prevent hanging if the daemon is unresponsive.
 func newCLIHTTPClient() *http.Client {
 	return &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout:   5 * time.Second,
+		Transport: &authTransport{rt: http.DefaultTransport, token: resolveAPIToken()},
 	}
 }
