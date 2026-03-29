@@ -87,16 +87,27 @@ func runGet(cid string) {
 		fatalf("could not create directory: %v", err)
 	}
 
-	// save the file
-	outFile, err := os.Create(savePath)
+	// save the file transparently to a temporary location first
+	// this prevents corrupted/partial files holding the final destination name if networking crashes
+	tempPath := savePath + ".tmp"
+	outFile, err := os.Create(tempPath)
 	if err != nil {
-		fatalf("could not create output file: %v", err)
+		fatalf("could not create temporary output file: %v", err)
 	}
-	defer outFile.Close()
 
 	written, err := io.Copy(outFile, resp.Body)
 	if err != nil {
+		outFile.Close()
+		os.Remove(tempPath)
 		fatalf("failed to save file: %v", err)
+	}
+
+	// ensure the file is closed so windows releases its file lock for rename
+	outFile.Close()
+
+	if err := os.Rename(tempPath, savePath); err != nil {
+		os.Remove(tempPath)
+		fatalf("failed to finalize downloaded file: %v", err)
 	}
 
 	fmt.Println("✓ Retrieved!")
