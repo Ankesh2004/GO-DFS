@@ -83,10 +83,23 @@ func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
 	if !strings.Contains(listenAddr, ":") {
 		listenAddr = ":" + listenAddr
 	}
-	host, port, _ := net.SplitHostPort(listenAddr)
-	if host == "" || host == "0.0.0.0" {
-		listenAddr = "127.0.0.1:" + port
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid API address %s: %w", addr, err)
 	}
+
+	if host == "" || host == "localhost" {
+		host = "127.0.0.1"
+	} else {
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid API host %q (must be an IP address or 'localhost')", host)
+		}
+		if !ip.IsLoopback() {
+			return nil, fmt.Errorf("control API must be bound to a loopback address, refusing to bind to: %s", host)
+		}
+	}
+	listenAddr = net.JoinHostPort(host, port)
 
 	api.httpServer = &http.Server{
 		Addr:         listenAddr,
