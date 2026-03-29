@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/spf13/cobra"
 )
@@ -43,6 +44,16 @@ func runLs() {
 		fatalf("failed to connect to node API at %s: %v\nIs the node running? (dfs node start)", apiAddr, err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var apiErr struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Error != "" {
+			fatalf("failed to list files: %s", apiErr.Error)
+		}
+		fatalf("failed to list files on node API (HTTP %d)", resp.StatusCode)
+	}
 
 	var result struct {
 		Files []lsEntry `json:"files"`

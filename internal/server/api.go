@@ -145,25 +145,41 @@ func (api *APIServer) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 64MB max memory for multipart parsing — bigger files stream to disk
-	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid multipart form: %v", err))
-		return
-	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
+	// limit uploads to 500GB strictly to prevent infinite memory/storage exhaustion attacks
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<30)
 
-	file, header, err := r.FormFile("file")
+	reader, err := r.MultipartReader()
 	if err != nil {
-		jsonError(w, http.StatusBadRequest, fmt.Sprintf("missing 'file' field: %v", err))
+		jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid multipart format: %v", err))
 		return
 	}
-	defer file.Close()
 
-	originalName := header.Filename
-	if originalName == "" {
-		originalName = "unnamed"
+	var file io.Reader
+	var originalName string
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, fmt.Sprintf("error reading multipart chunk: %v", err))
+			return
+		}
+
+		if part.FormName() == "file" {
+			file = part
+			originalName = part.FileName()
+			if originalName == "" {
+				originalName = "unnamed"
+			}
+			break
+		}
+	}
+
+	if file == nil {
+		jsonError(w, http.StatusBadRequest, "missing 'file' field")
+		return
 	}
 
 	cid, err := api.fileServer.StoreDataChunked(originalName, api.userKey, file)
