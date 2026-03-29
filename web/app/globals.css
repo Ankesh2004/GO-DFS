@@ -1,0 +1,173 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* GO-DFS Dark Theme - Always Dark */
+  --background: #0a0a0f;
+  --foreground: #f0f0f5;
+  --card: rgba(255, 255, 255, 0.03);
+  --card-foreground: #f0f0f5;
+  --card-hover: rgba(255, 255, 255, 0.06);
+  --popover: #0a0a0f;
+  --popover-foreground: #f0f0f5;
+  --primary: #00e5ff;
+  --primary-foreground: #0a0a0f;
+  --secondary: #7c3aed;
+  --secondary-foreground: #f0f0f5;
+  --muted: rgba(255, 255, 255, 0.03);
+  --muted-foreground: #8a8a9a;
+  --accent: #10b981;
+  --accent-foreground: #0a0a0f;
+  --destructive: #ef4444;
+  --destructive-foreground: #f0f0f5;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: #00e5ff;
+  --radius: 0.625rem;
+  
+  /* Custom GO-DFS tokens */
+  --glow-cyan: 0 0 30px rgba(0, 229, 255, 0.15);
+  --glow-purple: 0 0 30px rgba(124, 58, 237, 0.15);
+  --layer-blue: #3b82f6;
+  --layer-purple: #7c3aed;
+  --layer-emerald: #10b981;
+  --layer-cyan: #00e5ff;
+}
+
+.dark {
+  --background: #0a0a0f;
+  --foreground: #f0f0f5;
+  --card: rgba(255, 255, 255, 0.03);
+  --card-foreground: #f0f0f5;
+  --card-hover: rgba(255, 255, 255, 0.06);
+  --popover: #0a0a0f;
+  --popover-foreground: #f0f0f5;
+  --primary: #00e5ff;
+  --primary-foreground: #0a0a0f;
+  --secondary: #7c3aed;
+  --secondary-foreground: #f0f0f5;
+  --muted: rgba(255, 255, 255, 0.03);
+  --muted-foreground: #8a8a9a;
+  --accent: #10b981;
+  --accent-foreground: #0a0a0f;
+  --destructive: #ef4444;
+  --destructive-foreground: #f0f0f5;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: #00e5ff;
+}
+
+@theme inline {
+  --font-sans: 'Inter', 'Geist', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Geist Mono', monospace;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/* Gradient text utility */
+.gradient-text {
+  background: linear-gradient(180deg, #f0f0f5 0%, #00e5ff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Diagonal grid background */
+.diagonal-grid {
+  background-image: 
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.02) 0px,
+      rgba(255, 255, 255, 0.02) 1px,
+      transparent 1px,
+      transparent 40px
+    );
+}
+
+/* Glow effects */
+.glow-cyan {
+  box-shadow: var(--glow-cyan);
+}
+
+.glow-purple {
+  box-shadow: var(--glow-purple);
+}
+
+/* Glass effect */
+.glass {
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Scroll reveal animations */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease-out forwards;
+}
+
+/* Staggered delays for grid items */
+.stagger-1 { animation-delay: 0.1s; }
+.stagger-2 { animation-delay: 0.2s; }
+.stagger-3 { animation-delay: 0.3s; }
+.stagger-4 { animation-delay: 0.4s; }
+.stagger-5 { animation-delay: 0.5s; }
+.stagger-6 { animation-delay: 0.6s; }
+
+/* Terminal styling */
+.terminal-dots span {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.terminal-dots span:nth-child(1) { background: #ff5f57; }
+.terminal-dots span:nth-child(2) { background: #febc2e; }
+.terminal-dots span:nth-child(3) { background: #28c840; }

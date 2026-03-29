@@ -888,7 +888,13 @@ func (s *FileServer) pushToAddr(addr string, key string) error {
 // -------- Lifecycle --------
 
 func (s *FileServer) GetPeers() map[string]p2p.Peer {
-	return s.peers
+	s.peersLock.Lock()
+	defer s.peersLock.Unlock()
+	safeCopy := make(map[string]p2p.Peer, len(s.peers))
+	for k, v := range s.peers {
+		safeCopy[k] = v
+	}
+	return safeCopy
 }
 
 func (s *FileServer) Start() error {
