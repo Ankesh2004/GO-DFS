@@ -18,14 +18,22 @@ import (
 )
 
 var (
-	nodePort      string
-	nodeBootstrap string
-	nodeAdvertise string
-	nodeDataDir   string
-	nodeID        string
-	nodeRelay     bool
-	nodeAPIPort   string
+	nodePort        string
+	nodeBootstrap   string
+	nodeAdvertise   string
+	nodeDataDir     string
+	nodeID          string
+	nodeRelay       bool
+	nodeAPIPort     string
 	nodeInteractive bool
+
+	// RL placement flags
+	nodeStorageTier string
+	nodeLatency     float64
+	nodeCost        float64
+	nodeBandwidth   float64
+	nodeRLSidecar   string
+	nodeRLEnabled   bool
 )
 
 // nodeCmd is the parent for `dfs node <subcommand>`
@@ -58,6 +66,14 @@ func init() {
 	nodeStartCmd.Flags().BoolVar(&nodeRelay, "relay", false, "relay-only mode (no local storage)")
 	nodeStartCmd.Flags().StringVar(&nodeAPIPort, "api-port", ":9000", "HTTP control API port (localhost only)")
 	nodeStartCmd.Flags().BoolVarP(&nodeInteractive, "interactive", "i", false, "start the interactive REPL alongside the node")
+
+	// RL placement flags -- set these to simulate different hardware tiers
+	nodeStartCmd.Flags().StringVar(&nodeStorageTier, "tier", "ssd", "storage tier: nvme, ssd, or hdd")
+	nodeStartCmd.Flags().Float64Var(&nodeLatency, "latency", 5.0, "simulated I/O latency in ms")
+	nodeStartCmd.Flags().Float64Var(&nodeCost, "cost", 0.01, "simulated storage cost in $/GB/hour")
+	nodeStartCmd.Flags().Float64Var(&nodeBandwidth, "bandwidth", 100.0, "network bandwidth in Mbps")
+	nodeStartCmd.Flags().StringVar(&nodeRLSidecar, "rl-sidecar", "http://127.0.0.1:5100", "URL of the Python RL placement sidecar")
+	nodeStartCmd.Flags().BoolVar(&nodeRLEnabled, "rl-enabled", false, "enable RL-based placement optimization")
 
 	nodeCmd.AddCommand(nodeStartCmd)
 	rootCmd.AddCommand(nodeCmd)
@@ -111,6 +127,23 @@ func runNodeDaemon() {
 		Decoder:    p2p.SampleDecoder{},
 	})
 
+	// 4b. parse the storage tier from the CLI flag
+	var tier server.StorageTier
+	switch strings.ToLower(nodeStorageTier) {
+	case "nvme":
+		tier = server.TierNVMe
+	case "hdd":
+		tier = server.TierHDD
+	default:
+		tier = server.TierSSD
+	}
+
+	// figure out the RL sidecar URL -- empty string disables it
+	rlURL := ""
+	if nodeRLEnabled {
+		rlURL = nodeRLSidecar
+	}
+
 	s := server.NewFileServer(server.FileServerOptions{
 		ID:             idStr,
 		RootDir:        dataDir,
@@ -118,6 +151,13 @@ func runNodeDaemon() {
 		Transport:      transport,
 		BootstrapNodes: bootstrapNodes,
 		RelayOnly:      nodeRelay,
+		StorageProfile: server.StorageProfile{
+			Tier:          tier,
+			LatencyMs:     nodeLatency,
+			CostPerGBHour: nodeCost,
+			BandwidthMbps: nodeBandwidth,
+		},
+		RLSidecarURL: rlURL,
 	})
 	transport.OnPeer = s.OnPeer
 	// display first 16 only for clean display
@@ -131,6 +171,11 @@ func runNodeDaemon() {
 	fmt.Printf("Data Dir   : %s\n", dataDir)
 	fmt.Printf("Relay Mode : %v\n", nodeRelay)
 	fmt.Printf("API Port   : %s\n", nodeAPIPort)
+	fmt.Printf("Tier       : %s (latency=%.1fms, cost=$%.4f/GB/hr)\n", nodeStorageTier, nodeLatency, nodeCost)
+	fmt.Printf("RL Enabled : %v\n", nodeRLEnabled)
+	if nodeRLEnabled {
+		fmt.Printf("RL Sidecar : %s\n", nodeRLSidecar)
+	}
 	fmt.Println("========================================")
 
 	// 5. load encryption key and start the HTTP control API

@@ -1,0 +1,71 @@
+# benchmark/testbed.yaml — central config for all benchmark scenarios.
+# tweak this file, don't scatter magic numbers across Go/Python code.
+
+testbed:
+  node_count: 10                 # total nodes to spawn
+  replica_target: 3              # R value for the COP
+  rl_sidecar_port: 5100
+
+nodes:
+  - count: 3
+    tier: nvme
+    latency_ms: 1.0
+    cost_per_gb_hour: 0.05
+    bandwidth_mbps: 1000
+    reliability: stable           # 99% uptime
+
+  - count: 4
+    tier: ssd
+    latency_ms: 5.0
+    cost_per_gb_hour: 0.01
+    bandwidth_mbps: 200
+    reliability: stable
+
+  - count: 2
+    tier: hdd
+    latency_ms: 15.0
+    cost_per_gb_hour: 0.002
+    bandwidth_mbps: 50
+    reliability: flaky            # 70% uptime
+
+  - count: 1
+    tier: ssd
+    latency_ms: 8.0
+    cost_per_gb_hour: 0.008
+    bandwidth_mbps: 100
+    reliability: transient        # 30% uptime — the laptop-closer
+
+churn:
+  profiles:
+    stable:    { uptime_pct: 99, avg_session_min: 480 }
+    flaky:     { uptime_pct: 70, avg_session_min: 30 }
+    transient: { uptime_pct: 30, avg_session_min: 10 }
+
+workload:
+  total_files: 1000
+  file_size_range: [1KB, 50MB]
+  access_pattern: zipf            # zipf | uniform | sequential
+  zipf_exponent: 1.2
+  read_write_ratio: 0.7           # 70% reads, 30% writes
+  duration_minutes: 30
+
+scenarios:
+  - name: no_churn
+    description: "Baseline — pure latency/cost optimization"
+    override: { churn: { profiles: { stable: { uptime_pct: 100 } } } }
+
+  - name: mild_churn
+    description: "Realistic home network — 80% stable, 20% flaky"
+    # uses defaults above
+
+  - name: heavy_churn
+    description: "Stress test — worst-case P2P environment"
+    override:
+      nodes:
+        - { count: 5, tier: ssd, reliability: stable }
+        - { count: 3, tier: hdd, reliability: flaky }
+        - { count: 2, tier: ssd, reliability: transient }
+
+  - name: flash_crash
+    description: "Kill 3 nodes simultaneously at minute 15"
+    override: { churn: { kill_simultaneous: 3, kill_at_minute: 15 } }

@@ -78,6 +78,7 @@ func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
 	mux.HandleFunc("/api/peers", authMiddleware(api.handlePeers))
 	mux.HandleFunc("/api/status", authMiddleware(api.handleStatus))
 	mux.HandleFunc("/api/id", authMiddleware(api.handleID))
+	mux.HandleFunc("/api/metrics", authMiddleware(api.handleMetrics))
 
 	// force localhost binding - this API should NEVER be reachable from outside
 	listenAddr := addr
@@ -351,14 +352,14 @@ func (api *APIServer) handlePeers(w http.ResponseWriter, r *http.Request) {
 
 // -------- STATUS --------
 
-// handleStatus returns peer health and replication audit results.
+// handleStatus returns peer health, replication audit results, and RL placement info.
 func (api *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "use GET")
 		return
 	}
 
-	// peer health
+	// peer health -- now includes uptime and RTT calibration data
 	healthMap := api.fileServer.GetPeerHealthMap()
 	peerHealth := make([]map[string]any, 0, len(healthMap))
 	for addr, h := range healthMap {
@@ -367,10 +368,13 @@ func (api *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			status = fmt.Sprintf("WARNING (%d missed)", h.MissedPings)
 		}
 		peerHealth = append(peerHealth, map[string]any{
-			"addr":        addr,
-			"status":      status,
-			"lastSeen":    h.LastSeen.Format(time.RFC3339),
-			"missedPings": h.MissedPings,
+			"addr":          addr,
+			"status":        status,
+			"lastSeen":      h.LastSeen.Format(time.RFC3339),
+			"missedPings":   h.MissedPings,
+			"uptimeRatio":   h.UptimeRatio(),
+			"avgSessionSec": h.AvgSessionLength(),
+			"avgRTTMs":      h.AvgRTTMs,
 		})
 	}
 
@@ -388,10 +392,28 @@ func (api *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// file count
 	entries := api.fileServer.CIDIndex.List()
 
+	// RL placement status
+	rlStatus := map[string]any{
+		"enabled":    api.fileServer.Optimizer.enabled,
+		"sidecarURL": api.fileServer.Optimizer.sidecarURL,
+	}
+
+	// this node's own storage profile
+	p := api.fileServer.FileServerOptions.StorageProfile
+	storageProfile := map[string]any{
+		"tier":          p.Tier,
+		"latencyMs":     p.LatencyMs,
+		"costPerGBHour": p.CostPerGBHour,
+		"bandwidthMbps": p.BandwidthMbps,
+	}
+
 	jsonReply(w, http.StatusOK, map[string]any{
-		"peerHealth":  peerHealth,
-		"replication": replication,
-		"storedFiles": len(entries),
+		"peerHealth":     peerHealth,
+		"replication":    replication,
+		"storedFiles":    len(entries),
+		"rl":             rlStatus,
+		"storageProfile": storageProfile,
+		"placement":      api.fileServer.Metrics.Summary(),
 	})
 }
 
@@ -417,5 +439,22 @@ func (api *APIServer) handleID(w http.ResponseWriter, r *http.Request) {
 		"relayOnly":      api.fileServer.RelayOnly,
 		"keyLoaded":      len(api.userKey) > 0,
 		"keyFilePresent": keyFilePresent,
+	})
+}
+
+// -------- Metrics (Thesis Data) --------
+
+// handleMetrics dumps all placement and eviction records as JSON.
+// the benchmark harness pulls this from every node to build thesis graphs.
+func (api *APIServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "use GET")
+		return
+	}
+
+	jsonReply(w, http.StatusOK, map[string]any{
+		"placements": api.fileServer.Metrics.GetPlacements(),
+		"evictions":  api.fileServer.Metrics.GetEvictions(),
+		"summary":    api.fileServer.Metrics.Summary(),
 	})
 }

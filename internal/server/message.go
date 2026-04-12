@@ -7,6 +7,38 @@ import (
 	"github.com/Ankesh2004/GO-DFS/pkg/p2p"
 )
 
+// StorageTier classifies a node's primary storage hardware.
+// three tiers is enough for the RL agent to learn meaningful patterns —
+// any finer granularity just adds noise without improving placement quality.
+type StorageTier int
+
+const (
+	TierNVMe StorageTier = iota // fast flash, expensive
+	TierSSD                     // balanced price/performance
+	TierHDD                     // slow spinning rust, dirt cheap
+)
+
+// StorageProfile is the full fingerprint of a node — hardware, reliability, AND trust.
+// broadcast during PeerExchange so the RL agent has everything it needs to
+// solve the constrained placement optimization problem per-chunk.
+type StorageProfile struct {
+	// hardware characteristics (set via CLI flags at node startup)
+	Tier          StorageTier
+	LatencyMs     float64 // self-reported I/O latency in ms (lower = better)
+	CostPerGBHour float64 // simulated $/GB/hour for this tier
+	AvailableMB   int64   // free space in megabytes
+	BandwidthMbps float64 // network throughput estimate
+
+	// reliability metrics — computed from heartbeat history, NOT self-reported
+	UptimeRatio   float64 // 0.0-1.0, fraction of observed time the node was alive
+	AvgSessionSec int64   // average session length before disconnecting
+
+	// trust calibration — empirical vs claimed latency.
+	// the heartbeat loop measures actual RTT to this peer.
+	// if HeartbeatRTTMs >> LatencyMs, the profile is probably lying or outdated.
+	HeartbeatRTTMs float64 // observed average ping round-trip time in ms
+}
+
 func init() {
 	// Register all message types for gob encoding/decoding.
 	// Without this, the Message.Payload interface{} won't deserialize properly.
@@ -40,6 +72,10 @@ func init() {
 	gob.Register(MessageBatchChunkQuery{})
 	gob.Register(MessageBatchChunkResponse{})
 	gob.Register(MessageDropChunk{})
+
+	// RL placement types — needed for profiles to travel over the wire
+	gob.Register(StorageProfile{})
+	gob.Register(StorageTier(0))
 }
 
 // Message is the wrapper for all inter-node communication
@@ -66,12 +102,14 @@ type PeerInfo struct {
 }
 
 // MessagePeerExchange is sent right after a connection is established.
-// It lets both sides learn each other's DHT ID and reachable address.
+// It lets both sides learn each other's DHT ID, reachable address,
+// and hardware/reliability profile for RL-driven placement.
 type MessagePeerExchange struct {
-	ID         [32]byte   // sender's DHT ID
-	ListenAddr string     // sender's advertised listen address (public IP:port)
-	KnownPeers []PeerInfo // share some of our routing table so the new node can bootstrap faster
-	RelayOnly  bool       // if true, this node shouldn't be used for storage/replication
+	ID             [32]byte       // sender's DHT ID
+	ListenAddr     string         // sender's advertised listen address (public IP:port)
+	KnownPeers     []PeerInfo     // share some of our routing table so the new node can bootstrap faster
+	RelayOnly      bool           // if true, this node shouldn't be used for storage/replication
+	StorageProfile StorageProfile // this node's hardware + reliability fingerprint
 }
 
 // MessageFindNode is the core Kademlia lookup RPC.
@@ -190,10 +228,13 @@ type MessageBatchChunkQuery struct {
 
 // MessageBatchChunkResponse is the answer — lists which of the asked chunks
 // this peer actually has on disk. only includes the ones it has, not the full list.
+// also carries the responder's storage profile so the auditor can factor in
+// hardware capabilities when deciding replication targets.
 type MessageBatchChunkResponse struct {
-	AuditID    string   // matches the query
-	HeldChunks []string // chunk keys this peer holds (subset of what was asked)
-	HolderAddr string   // advertise addr of the responding peer
+	AuditID        string         // matches the query
+	HeldChunks     []string       // chunk keys this peer holds (subset of what was asked)
+	HolderAddr     string         // advertise addr of the responding peer
+	StorageProfile StorageProfile // responder's current profile snapshot
 }
 
 // MessageDropChunk tells a node it can delete a chunk because there are

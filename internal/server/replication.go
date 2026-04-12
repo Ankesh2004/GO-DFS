@@ -27,11 +27,62 @@ const (
 )
 
 // PeerHealth tracks whether a peer is alive or ghosting us.
-// missedPings goes up each heartbeat if they don't pong back,
-// resets to 0 when they do.
+// also maintains historical availability and latency calibration data
+// that feeds directly into the RL agent's state space for placement decisions.
 type PeerHealth struct {
 	LastSeen    time.Time
 	MissedPings int
+
+	// rolling reliability tracking -- lets us compute how "stable" this peer is.
+	// the RL agent uses UptimeRatio() to avoid placing data on flaky nodes.
+	FirstSeen      time.Time     // when we first saw this peer
+	TotalUptime    time.Duration // cumulative time the peer was responsive
+	TotalDowntime  time.Duration // cumulative time it was unresponsive
+	SessionStarts  int           // how many times it came back from the dead
+	LastSessionLen time.Duration // last completed session duration
+	sessionStart   time.Time     // when current alive-session began
+
+	// RTT calibration -- the "truth serum" for self-reported profiles.
+	// if a node claims Latency=2ms but heartbeat RTT averages 150ms,
+	// the RL agent learns to not trust that node's profile.
+	RTTSamples []float64 // sliding window of recent ping RTTs in ms
+	AvgRTTMs   float64   // exponential moving average of RTT
+}
+
+// UptimeRatio returns a 0.0-1.0 score of this peer's historical reliability.
+// brand new peers get 0.5 -- benefit of the doubt until we have data.
+func (ph *PeerHealth) UptimeRatio() float64 {
+	total := ph.TotalUptime + ph.TotalDowntime
+	if total == 0 {
+		return 0.5
+	}
+	return float64(ph.TotalUptime) / float64(total)
+}
+
+// AvgSessionLength returns the average session duration in seconds.
+// returns 0 if we have no session data yet.
+func (ph *PeerHealth) AvgSessionLength() int64 {
+	if ph.SessionStarts == 0 {
+		return 0
+	}
+	return int64(ph.TotalUptime.Seconds()) / int64(ph.SessionStarts)
+}
+
+// RecordRTT adds a new round-trip sample and updates the moving average.
+// keeps the last 20 samples so recent network conditions weigh more.
+func (ph *PeerHealth) RecordRTT(rttMs float64) {
+	const maxSamples = 20
+	ph.RTTSamples = append(ph.RTTSamples, rttMs)
+	if len(ph.RTTSamples) > maxSamples {
+		ph.RTTSamples = ph.RTTSamples[len(ph.RTTSamples)-maxSamples:]
+	}
+	// exponential moving average -- recent pings matter more than old ones
+	alpha := 0.3
+	if ph.AvgRTTMs == 0 {
+		ph.AvgRTTMs = rttMs
+	} else {
+		ph.AvgRTTMs = alpha*rttMs + (1-alpha)*ph.AvgRTTMs
+	}
 }
 
 // holderSet is a set of advertise addresses that reported holding a chunk.
@@ -84,6 +135,9 @@ func (s *FileServer) runHeartbeat() {
 		return
 	}
 
+	// timestamp before sending pings so we can measure RTT later
+	pingSentAt := time.Now()
+
 	// ping everyone
 	pingMsg := &Message{Payload: MessagePing{}}
 	for _, entry := range peerList {
@@ -105,24 +159,37 @@ func (s *FileServer) runHeartbeat() {
 	for _, entry := range peerList {
 		health, exists := s.peerHealth[entry.addr]
 		if !exists {
-			// first time seeing this peer in heartbeat — initialize
+			// first time seeing this peer in heartbeat -- initialize with session tracking
+			now := time.Now()
 			s.peerHealth[entry.addr] = &PeerHealth{
-				LastSeen:    time.Now(),
-				MissedPings: 0,
+				LastSeen:      now,
+				MissedPings:   0,
+				FirstSeen:     now,
+				SessionStarts: 1,
+				sessionStart:  now,
 			}
 			continue
 		}
 
-		// if they responded, handlePong already reset missedPings.
-		// if they didn't, bump the counter.
+		// if they responded, handlePong already reset missedPings via markPeerAlive.
+		// if they didn't, bump the counter and accumulate downtime for the RL agent.
 		if time.Since(health.LastSeen) > s.HeartbeatInterval {
 			health.MissedPings++
+			health.TotalDowntime += s.HeartbeatInterval
 			if health.MissedPings >= s.FailureThreshold {
 				deadPeers = append(deadPeers, entry.addr)
 			} else {
 				fmt.Printf("[%s] Heartbeat: peer %s missed %d/%d pings\n",
 					s.Transport.Addr(), entry.addr, health.MissedPings, s.FailureThreshold)
 			}
+		} else {
+			// peer responded -- record RTT and accumulate uptime
+			rttMs := float64(time.Since(pingSentAt).Microseconds()) / 1000.0
+			health.RecordRTT(rttMs)
+			health.TotalUptime += s.HeartbeatInterval
+
+			// feed RTT calibration data to the RL sidecar in the background
+			go s.Optimizer.RecordRTT(entry.addr, health.AvgRTTMs)
 		}
 	}
 	s.healthLock.Unlock()
@@ -132,34 +199,47 @@ func (s *FileServer) runHeartbeat() {
 		s.evictDeadPeer(addr)
 	}
 	if len(deadPeers) > 0 {
-		// a node went down — don't wait for the next audit cycle,
+		// a node went down -- don't wait for the next audit cycle,
 		// check chunk health RIGHT NOW so we can re-replicate fast
 		go s.runReplicationAudit()
 	}
 }
 
 // markPeerAlive is called by handlePong to reset a peer's health status.
-// this is how we know a peer is still alive — they responded to our ping.
+// also handles session tracking for the RL agent's uptime calculations.
 func (s *FileServer) markPeerAlive(addr string) {
 	s.healthLock.Lock()
 	defer s.healthLock.Unlock()
 
+	now := time.Now()
 	health, exists := s.peerHealth[addr]
 	if !exists {
 		s.peerHealth[addr] = &PeerHealth{
-			LastSeen:    time.Now(),
-			MissedPings: 0,
+			LastSeen:      now,
+			MissedPings:   0,
+			FirstSeen:     now,
+			SessionStarts: 1,
+			sessionStart:  now,
 		}
 		return
 	}
 
-	health.LastSeen = time.Now()
+	// if the peer was considered "iffy" (had missed pings) and is now back,
+	// that means a new session started -- record the gap as downtime.
+	if health.MissedPings > 0 {
+		health.SessionStarts++
+		health.sessionStart = now
+	}
+
+	health.LastSeen = now
 	health.MissedPings = 0
 }
 
 // evictDeadPeer removes a peer from every tracking structure.
-// this is the "funeral" — once we call this, the peer is gone from
+// this is the "funeral" -- once we call this, the peer is gone from
 // our worldview until they reconnect and do PeerExchange again.
+// also fires a signal to the RL sidecar so it learns the penalty for
+// placing data on unreliable nodes.
 func (s *FileServer) evictDeadPeer(addr string) {
 	fmt.Printf("[%s] EVICTING dead peer: %s (missed %d heartbeats)\n",
 		s.Transport.Addr(), addr, s.FailureThreshold)
@@ -190,10 +270,26 @@ func (s *FileServer) evictDeadPeer(addr string) {
 		}
 	}
 
-	// clean up health tracking
+	// finalize the peer's last session length before we delete their health record
 	s.healthLock.Lock()
+	if health, ok := s.peerHealth[addr]; ok {
+		if !health.sessionStart.IsZero() {
+			health.LastSessionLen = time.Since(health.sessionStart)
+			health.TotalUptime += health.LastSessionLen
+		}
+	}
 	delete(s.peerHealth, addr)
 	s.healthLock.Unlock()
+
+	// clean up their storage profile
+	s.peerProfilesLock.Lock()
+	delete(s.peerProfiles, addr)
+	s.peerProfilesLock.Unlock()
+
+	// tell the RL agent: "this node you probably placed data on just died."
+	// the sidecar will apply a massive negative reward to all recent placements
+	// that targeted this address, teaching the model to avoid flaky peers.
+	go s.Optimizer.RecordEviction(addr)
 }
 
 // -------- Replication Audit Loop --------
@@ -401,11 +497,11 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]holderSet {
 // -------- Under-Replication Handling --------
 
 // handleUnderReplication pushes a chunk to more nodes to reach ReplicaTarget.
-// now uses the actual holder set to skip nodes that already have the chunk
-// instead of blindly picking DHT-closest and hoping for the best.
+// uses RL-optimized node selection when the sidecar is available, falling back
+// to standard DHT-closest ordering otherwise. per-chunk decisions.
 func (s *FileServer) handleUnderReplication(chunkKey string, holders holderSet) {
 	if !s.Store.Has(chunkKey) {
-		// we don't have the chunk ourselves — can't push what we don't have.
+		// we don't have the chunk ourselves -- can't push what we don't have.
 		// another node that has it will handle the re-replication.
 		return
 	}
@@ -421,15 +517,12 @@ func (s *FileServer) handleUnderReplication(chunkKey string, holders holderSet) 
 	targetID := dht.NewID(chunkKey)
 	candidates := s.DHT.NearestNodes(targetID, dht.K)
 
-	pushed := 0
+	// build candidate list excluding self, relays, and current holders
+	var nodeCandidates []NodeCandidate
 	for _, node := range candidates {
-		if pushed >= needed {
-			break
-		}
 		if node.Addr == s.AdvertiseAddr || node.Addr == s.Transport.Addr() {
 			continue
 		}
-		// skip nodes that already have the chunk — we know from the audit
 		if _, alreadyHas := holders[node.Addr]; alreadyHas {
 			continue
 		}
@@ -440,12 +533,34 @@ func (s *FileServer) handleUnderReplication(chunkKey string, holders holderSet) 
 			continue
 		}
 
-		fmt.Printf("[%s] Re-replicating chunk %s to %s\n",
-			s.Transport.Addr(), truncateKey(chunkKey, 16), node.Addr)
+		profile := s.buildCandidateProfile(node.Addr)
+		nodeCandidates = append(nodeCandidates, NodeCandidate{
+			Addr: node.Addr, Profile: profile,
+		})
+	}
 
-		if err := s.pushChunkToAddr(node.Addr, chunkKey); err != nil {
+	// RL-optimized target selection (reliability-aware).
+	// the agent considers uptime, latency, cost, and trust divergence.
+	targetAddrs, _, err := s.Optimizer.SelectOptimalNodes(nodeCandidates, 0, needed)
+	if err != nil {
+		// sidecar is down, fall back to standard DHT ordering
+		for _, nc := range nodeCandidates {
+			targetAddrs = append(targetAddrs, nc.Addr)
+		}
+	}
+
+	pushed := 0
+	for _, addr := range targetAddrs {
+		if pushed >= needed {
+			break
+		}
+
+		fmt.Printf("[%s] Re-replicating chunk %s to %s\n",
+			s.Transport.Addr(), truncateKey(chunkKey, 16), addr)
+
+		if err := s.pushChunkToAddr(addr, chunkKey); err != nil {
 			fmt.Printf("[%s] Failed to re-replicate chunk %s to %s: %v\n",
-				s.Transport.Addr(), truncateKey(chunkKey, 16), node.Addr, err)
+				s.Transport.Addr(), truncateKey(chunkKey, 16), addr, err)
 			continue
 		}
 		pushed++

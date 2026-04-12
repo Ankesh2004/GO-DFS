@@ -23,6 +23,10 @@ type FileServerOptions struct {
 	Transport      p2p.Transport
 	BootstrapNodes []string
 	RelayOnly      bool // if true, this node will act ONLY as a relay and won't store data
+
+	// RL placement config -- per-node hardware profile and sidecar URL
+	StorageProfile StorageProfile // this node's hardware fingerprint (tier, latency, cost, etc.)
+	RLSidecarURL   string         // e.g. "http://127.0.0.1:5100" -- empty string disables RL
 }
 
 type FileServer struct {
@@ -41,6 +45,18 @@ type FileServer struct {
 	relayPeers    map[string]bool   // map of advertised addrs that are RelayOnly=true
 	pendingChunks sync.Map          // chunkKey --> chan struct{}, signals when a requested chunk arrives
 	CIDIndex      *storage.CIDIndex // local index mapping CID --> original filename
+
+	// peer storage profiles for RL placement decisions.
+	// populated during PeerExchange -- maps advertise addr to hardware fingerprint.
+	peerProfiles     map[string]StorageProfile
+	peerProfilesLock sync.RWMutex
+
+	// the RL placement optimizer talks to the Python sidecar.
+	// nil if RL is disabled (empty RLSidecarURL).
+	Optimizer *PlacementOptimizer
+
+	// thesis metrics -- tracks every placement decision and eviction
+	Metrics *PlacementMetrics
 
 	// replication health tracking
 	peerHealth       map[string]*PeerHealth // tracks heartbeat status per peer
@@ -64,7 +80,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 	store := storage.NewStore(options.RootDir)
 	id := dht.NewID(options.ID)
 
-	return &FileServer{
+	s := &FileServer{
 		FileServerOptions: options,
 		ID:                id,
 		DHT:               dht.NewKademlia(id),
@@ -76,12 +92,19 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		addrMap:           make(map[string]string),
 		relayPeers:        make(map[string]bool),
 		CIDIndex:          storage.NewCIDIndex(options.RootDir),
+		peerProfiles:      make(map[string]StorageProfile),
 		peerHealth:        make(map[string]*PeerHealth),
 		HeartbeatInterval: DefaultHeartbeatInterval,
 		FailureThreshold:  DefaultFailureThreshold,
 		AuditInterval:     DefaultAuditInterval,
 		AuditTimeout:      DefaultAuditTimeout,
 	}
+
+	// wire up the RL placement optimizer if a sidecar URL was provided
+	s.Optimizer = NewPlacementOptimizer(options.RLSidecarURL)
+	s.Metrics = NewPlacementMetrics()
+
+	return s
 }
 
 // -------- Message Routing --------
@@ -164,10 +187,11 @@ func (s *FileServer) sendPeerExchange(peer p2p.Peer) error {
 
 	msg := Message{
 		Payload: MessagePeerExchange{
-			ID:         s.ID,
-			ListenAddr: s.AdvertiseAddr,
-			KnownPeers: knownPeers,
-			RelayOnly:  s.RelayOnly,
+			ID:             s.ID,
+			ListenAddr:     s.AdvertiseAddr,
+			KnownPeers:     knownPeers,
+			RelayOnly:      s.RelayOnly,
+			StorageProfile: s.FileServerOptions.StorageProfile,
 		},
 	}
 	return s.sendToPeer(peer, &msg)
@@ -209,8 +233,13 @@ func (s *FileServer) handlePeerExchange(from string, msg MessagePeerExchange) er
 		}
 		s.peersLock.Unlock()
 
-		fmt.Printf("[%s] PeerExchange from %s → ID: %s, Listen: %s, shared %d peers\n",
-			s.Transport.Addr(), from, peerID.String()[:8], listenAddr, len(msg.KnownPeers))
+		// stash their hardware profile so the RL agent can use it for placement
+		s.peerProfilesLock.Lock()
+		s.peerProfiles[listenAddr] = msg.StorageProfile
+		s.peerProfilesLock.Unlock()
+
+		fmt.Printf("[%s] PeerExchange from %s → ID: %s, Listen: %s, shared %d peers, tier: %d\n",
+			s.Transport.Addr(), from, peerID.String()[:8], listenAddr, len(msg.KnownPeers), msg.StorageProfile.Tier)
 	} else {
 		// No advertise addr provided, fall back to raw TCP address
 		s.DHT.Update(peerID, from)

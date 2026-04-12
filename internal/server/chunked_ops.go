@@ -538,7 +538,7 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 	fmt.Printf("[%s] File stored: CID=%s, name=%s, %d chunks, %d bytes\n",
 		s.Transport.Addr(), cid[:16], originalName, len(chunks), totalSize)
 
-	// step 4: replicate manifest + chunks to DHT-nearest nodes
+	// step 4: replicate manifest + chunks to RL-optimized nodes (or DHT-nearest fallback)
 	targetID := dht.NewID(cid)
 	closest := s.DHT.NearestNodes(targetID, dht.K)
 
@@ -551,39 +551,100 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 		s.peersLock.Unlock()
 	}
 
+	// build candidate list with full profiles for the RL agent
+	var nodeCandidates []NodeCandidate
 	for _, node := range closest {
 		if node.Addr == s.AdvertiseAddr || node.Addr == s.Transport.Addr() {
 			continue
 		}
-		// skip relay-only nodes
 		s.peersLock.Lock()
 		isRelay := s.relayPeers[node.Addr]
 		s.peersLock.Unlock()
 		if isRelay {
-			fmt.Printf("[%s] Skipping %s for replication (RelayOnly)\n", s.Transport.Addr(), node.Addr)
 			continue
 		}
 
-		// send the manifest via normal message
+		profile := s.buildCandidateProfile(node.Addr)
+		nodeCandidates = append(nodeCandidates, NodeCandidate{
+			Addr: node.Addr, Profile: profile,
+		})
+	}
+
+	// ask the RL agent for the best targets from these K candidates.
+	// if the sidecar is down, fall back to standard DHT ordering.
+	placementStart := time.Now()
+	var targetAddrs []string
+	var placementID string
+	method := "rl"
+
+	targetAddrs, placementID, err = s.Optimizer.SelectOptimalNodes(
+		nodeCandidates, totalSize, ReplicaTarget,
+	)
+	if err != nil {
+		method = "kademlia_fallback"
+		fmt.Printf("[%s] RL sidecar unavailable, using Kademlia fallback: %v\n",
+			s.Transport.Addr(), err)
+		targetAddrs = nil
+		for _, nc := range nodeCandidates {
+			targetAddrs = append(targetAddrs, nc.Addr)
+		}
+	}
+
+	// push manifest + chunks to the selected nodes
+	for _, addr := range targetAddrs {
 		manifestMsg := &Message{
 			Payload: MessageStoreManifest{
 				Key:      manifestKey,
 				Manifest: manifest,
 			},
 		}
-		if err := s.sendToAddr(node.Addr, manifestMsg); err != nil {
-			fmt.Printf("[%s] Failed to send manifest to %s: %v\n", s.Transport.Addr(), node.Addr, err)
+		if err := s.sendToAddr(addr, manifestMsg); err != nil {
+			fmt.Printf("[%s] Failed to send manifest to %s: %v\n", s.Transport.Addr(), addr, err)
 			continue
 		}
 
-		// push each chunk
 		for _, chunkKey := range chunkKeys {
-			fmt.Printf("[%s] Pushing chunk %s to %s\n", s.Transport.Addr(), chunkKey[:16], node.Addr)
-			if err := s.pushChunkToAddr(node.Addr, chunkKey); err != nil {
+			fmt.Printf("[%s] Pushing chunk %s to %s\n", s.Transport.Addr(), chunkKey[:16], addr)
+			if err := s.pushChunkToAddr(addr, chunkKey); err != nil {
 				fmt.Printf("[%s] Failed to push chunk %s to %s: %v\n",
-					s.Transport.Addr(), chunkKey[:16], node.Addr, err)
+					s.Transport.Addr(), chunkKey[:16], addr, err)
 			}
 		}
+	}
+
+	// log metrics for the thesis -- how long the placement took, which method, etc.
+	placementDuration := time.Since(placementStart)
+	var avgLat, totalCost, avgUptime float64
+	var selectedTiers []StorageTier
+	for _, nc := range nodeCandidates {
+		for _, addr := range targetAddrs {
+			if nc.Addr == addr {
+				avgLat += nc.Profile.LatencyMs
+				totalCost += nc.Profile.CostPerGBHour
+				avgUptime += nc.Profile.UptimeRatio
+				selectedTiers = append(selectedTiers, nc.Profile.Tier)
+			}
+		}
+	}
+	if len(targetAddrs) > 0 {
+		avgLat /= float64(len(targetAddrs))
+		avgUptime /= float64(len(targetAddrs))
+	}
+	s.Metrics.RecordPlacement(PlacementRecord{
+		Timestamp:     time.Now(),
+		ChunkKey:      cid,
+		Method:        method,
+		SelectedNodes: targetAddrs,
+		SelectedTiers: selectedTiers,
+		AvgLatencyMs:  avgLat,
+		TotalCost:     totalCost,
+		AvgUptime:     avgUptime,
+		DurationMs:    placementDuration.Milliseconds(),
+	})
+
+	// tell the RL agent how the placement went (for online learning)
+	if placementID != "" {
+		go s.Optimizer.RecordOutcome(placementID, float64(placementDuration.Milliseconds()), true)
 	}
 	// record in local index so we can list stored files later
 	s.CIDIndex.Add(storage.CIDEntry{
