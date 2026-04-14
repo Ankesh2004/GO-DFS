@@ -1,0 +1,844 @@
+================================================================================
+   MULTI-OBJECTIVE DEEP REINFORCEMENT LEARNING FOR INTELLIGENT DATA PLACEMENT
+              IN DECENTRALIZED PEER-TO-PEER FILE SYSTEMS
+================================================================================
+
+                         COMPLETE PROBLEM FORMULATION
+                   Mathematics, Citations, and Novel Steps
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. Problem Statement
+  2. Motivation and Background
+  3. System Model
+  4. Step 1: MDP Formulation
+  5. Step 2: State Space Construction
+  6. Step 3: Action Space Design
+  7. Step 4: Multi-Objective Reward Function               [NOVEL]
+  8. Step 5: DDPG Algorithm
+  9. Step 6: Training Procedure
+  10. Step 7: Trust Calibration via RTT Divergence          [NOVEL]
+  11. Step 8: Retroactive Eviction Penalty                  [NOVEL]
+  12. Step 9: Heuristic Bootstrap (Warmup)
+  13. Step 10: Soft Target Network Updates
+  14. Novelty Summary
+  15. References
+
+================================================================================
+1. PROBLEM STATEMENT
+================================================================================
+
+Given a peer-to-peer distributed file system with N heterogeneous nodes,
+each possessing distinct hardware profiles (storage tier, I/O latency,
+cost, bandwidth) and exhibiting dynamic availability patterns (churn),
+the problem is:
+
+    For each incoming data chunk c, select R replica target nodes from
+    K available candidates such that the placement simultaneously
+    minimizes access latency, minimizes storage cost, and maximizes
+    data reliability (survival probability under churn).
+
+This is a sequential, online decision problem under uncertainty. The state
+of the network changes continuously as nodes join, leave, and degrade.
+Traditional DHT-based placement (Kademlia [4]) selects targets by XOR
+distance, which is entirely hardware-blind — it treats a fast NVMe server
+and a flaky laptop with an old HDD as interchangeable.
+
+We propose replacing the blind DHT selection with a learned policy that
+optimizes placement across three competing objectives.
+
+================================================================================
+2. MOTIVATION AND BACKGROUND
+================================================================================
+
+2.1 Limitations of Kademlia DHT
+--------------------------------
+
+Kademlia [4] routes based on XOR distance d(x, y) = x XOR y. Given a
+chunk with key k, it returns the K closest nodes by this metric. For
+replication, the system picks the R closest nodes:
+
+    targets = argsort_{n in N}(d(hash(n), hash(k)))[:R]
+
+This selection is:
+  - Hardware-blind: does not consider storage tier, latency, or cost
+  - Reliability-blind: does not consider node uptime or churn patterns
+  - Static: cannot adapt to changing network conditions
+
+Citation: Maymounkov, P. & Mazieres, D. "Kademlia: A Peer-to-Peer
+Information System Based on the XOR Metric." IPTPS 2002. [4]
+
+2.2 Why Deep RL?
+-----------------
+
+Recent work has demonstrated that DRL outperforms static heuristics for
+storage placement in heterogeneous environments:
+
+  - Xing & Wang (2025) [5] showed that predictive multi-objective RL
+    can simultaneously optimize latency, throughput, and cost for tiered
+    storage, outperforming reactive heuristics.
+
+  - Cheng et al. (2024) [6] (RL-Storage) demonstrated that DRL can
+    dynamically optimize storage kernel parameters, achieving 2.6x
+    throughput gains over static configurations.
+
+  - Edge-cloud replica placement work (2024) [17] proved that RL-based
+    replication improves data reliability in churn-prone environments.
+
+Our work extends these results to the P2P context, where there is no
+central controller — the placement agent runs as a sidecar alongside
+each peer node.
+
+================================================================================
+3. SYSTEM MODEL
+================================================================================
+
+3.1 Network
+-----------
+
+The network consists of N peer nodes connected via a Kademlia DHT overlay.
+Each node n_i maintains:
+
+  - A StorageProfile: hardware and reliability characteristics
+  - A PeerHealth record: heartbeat history and RTT measurements
+  - A local CAS (Content-Addressable Storage) for chunk storage
+
+Nodes communicate via gossip (PeerExchange) to propagate profiles, and
+via periodic heartbeats to track liveness.
+
+3.2 Node Profile
+-----------------
+
+Each node n_i broadcasts a StorageProfile during PeerExchange:
+
+    P_i = {tau_i, l_i, p_i, b_i, a_i, u_i, d_i, r_i}
+
+Where:
+    tau_i   = storage tier (NVMe=0, SSD=1, HDD=2)
+    l_i     = self-reported I/O latency (ms)
+    p_i     = storage cost ($/GB/hour)
+    b_i     = network bandwidth (Mbps)
+    a_i     = available storage capacity (MB)
+    u_i     = uptime ratio (fraction of time online), from PeerHealth
+    d_i     = average session length (seconds), from PeerHealth
+    r_i     = empirically measured heartbeat RTT (ms), from PeerHealth
+
+The first 5 fields are self-reported. The last 3 are independently
+observed by the receiving node — this distinction is critical for trust
+calibration (Step 7).
+
+3.3 Placement Sidecar Architecture
+------------------------------------
+
+The RL agent runs as a Python process (Flask API) alongside the Go-based
+DFS node. When a chunk needs replication, the Go node:
+
+    1. Queries the DHT for K closest candidates
+    2. Enriches each candidate with its StorageProfile + PeerHealth
+    3. Sends an HTTP POST to the RL sidecar at /optimize_placement
+    4. Receives back the R best target addresses
+    5. Falls back to standard Kademlia ordering if the sidecar is down
+
+This graceful degradation ensures the system remains functional even
+if the RL component fails.
+
+================================================================================
+4. STEP 1: MDP FORMULATION
+================================================================================
+
+We formulate the chunk placement problem as a Markov Decision Process:
+
+    M = (S, A, R, P, gamma)
+
+Where:
+    S     = state space (candidate node profiles at time t)
+    A     = action space (continuous score vector over K candidates)
+    R     = reward function (multi-objective feedback signal)
+    P     = transition function (how the network state evolves)
+    gamma = discount factor (0.99)
+
+The Markov property holds because the current set of candidate profiles
+contains all information necessary for the placement decision — the
+agent does not need the full history of past placements.
+
+Citation: Sutton, R. S. & Barto, A. G. "Reinforcement Learning: An
+Introduction." 2nd ed. MIT Press, 2018. Chapter 3. [11]
+
+The discount factor gamma = 0.99 is set high because current placement
+decisions have long-term consequences — a chunk placed on a dying node
+triggers re-replication minutes or hours later.
+
+Citation: Fujimoto et al. (2018) [3] and Lillicrap et al. (2016) [1]
+both use gamma = 0.99 for continuous control tasks.
+
+================================================================================
+5. STEP 2: STATE SPACE CONSTRUCTION
+================================================================================
+
+At each placement step t, the agent observes a state s_t constructed
+from the K available candidate nodes.
+
+5.1 Per-Candidate Feature Vector
+----------------------------------
+
+Each candidate c_i is encoded as an 11-dimensional feature vector:
+
+    f_i = [ l_i/100,                      -- normalized latency
+            p_i * 100,                     -- scaled-up cost
+            a_i/100000,                    -- normalized capacity
+            b_i/1000,                      -- normalized bandwidth
+            1[tau_i = NVMe],               -- one-hot tier encoding
+            1[tau_i = SSD],                --   (3 binary features)
+            1[tau_i = HDD],                --
+            u_i,                           -- uptime ratio [0,1]
+            min(d_i/3600, 1),              -- session length in hours
+            r_i/100,                       -- normalized heartbeat RTT
+            min(delta_i/5, 1)  ]           -- trust divergence score
+
+Where delta_i is the trust divergence defined in Step 7.
+
+5.2 Normalization
+------------------
+
+All features are normalized to approximately [0, 1]. This is critical
+because neural networks train poorly when input features span different
+magnitudes. Without normalization, gradient descent would be dominated
+by whichever feature has the largest raw value (e.g., available_mb in
+the thousands vs. uptime_ratio in [0, 1]).
+
+Citation: Henderson et al. [9] Section 4.3 demonstrated that input
+scaling significantly affects DDPG convergence.
+
+5.3 Tier Encoding
+------------------
+
+Storage tier is a categorical variable, not ordinal. We use one-hot
+encoding because treating it as a number (NVMe=0, SSD=1, HDD=2) would
+imply a false ordinal relationship (that SSD is "between" NVMe and HDD
+in some linear sense).
+
+5.4 Fixed-Size State Vector
+-----------------------------
+
+The full state is the concatenation of all K candidate feature vectors,
+zero-padded to a fixed maximum K_max = 20:
+
+    s_t = [f_1 || f_2 || ... || f_K || 0 || ... || 0] in R^(K_max * 11)
+
+    State dimension = 20 * 11 = 220
+
+The padding is necessary because neural networks require fixed-size
+input. K_max = 20 matches Kademlia's default bucket size k = 20 [4].
+
+================================================================================
+6. STEP 3: ACTION SPACE DESIGN
+================================================================================
+
+The action a_t in R^(K_max) is a continuous score vector. Each element
+a_t[i] represents the agent's preference for candidate i. To select R
+replicas, we take the top-R indices by score:
+
+    selected = argsort(a_t)[-R:]
+
+6.1 Why Continuous Scores?
+----------------------------
+
+Directly outputting a discrete subset of R from K candidates would
+require choosing from C(K, R) = C(20, 3) = 1140 possible subsets.
+This combinatorial action space is intractable for policy gradient
+methods. The continuous relaxation via scoring lets DDPG's deterministic
+policy work in R^20 and discretize only at the final selection step.
+
+Citation: The DDPG algorithm [1] was specifically designed for
+continuous action spaces where discrete methods (DQN [2]) fail.
+
+6.2 Output Activation
+-----------------------
+
+The actor network uses tanh on its output layer, bounding all scores
+to [-1, 1]. This prevents unbounded outputs that could destabilize
+training.
+
+    a_t = tanh(W_out * h + b_out)
+
+Citation: Standard DDPG practice from Lillicrap et al. [1].
+
+================================================================================
+7. STEP 4: MULTI-OBJECTIVE REWARD FUNCTION                          [NOVEL]
+================================================================================
+
+*** THIS IS THE PRIMARY NOVEL CONTRIBUTION ***
+
+We design a three-phase hybrid reward system that provides learning
+signal at three different timescales: immediate (every placement),
+empirical (after file transfer), and retroactive (when a node dies).
+
+7.1 Phase A: Dense Immediate Reward (per placement)
+-----------------------------------------------------
+
+Given selected indices I = {i_1, i_2, ..., i_R}, the immediate reward:
+
+    R_immediate = -w1 * L_avg - w2 * C_total - w3 * F_avg
+                  + w4 * M_avg - w5 * D_avg
+
+Where:
+
+    L_avg   = (1/R) * SUM_{j in I} l_j              -- avg latency
+    C_total = SUM_{j in I} p_j                       -- total cost
+    F_avg   = (1/R) * SUM_{j in I} (1 - u_j)         -- avg failure prob
+    M_avg   = (1/R) * SUM_{j in I} min(a_j/10000, 1) -- avg capacity margin
+    D_avg   = (1/R) * SUM_{j in I} |r_j - l_j|/l_j   -- avg trust divergence
+
+Reward weights:
+
+    w1 (latency)     = 1.0    -- baseline priority
+    w2 (cost)        = 0.5    -- half as important as latency
+    w3 (reliability) = 2.0    -- HIGHEST: churn is the P2P killer
+    w4 (capacity)    = 0.1    -- small bonus for headroom
+    w5 (trust)       = 1.5    -- penalize dishonest/degraded nodes
+
+NOVELTY: The combination of 5 weighted objectives in a single dense
+reward signal for P2P chunk placement is new. Existing work optimizes
+{latency, cost} [6] or {latency, throughput, cost} [5] for centralized
+storage. We add reliability (w3) and trust divergence (w5) because P2P
+systems have no central authority to verify node claims.
+
+WHY w3 = 2.0 (highest weight)?
+In a P2P network, a node that is blazing fast and cheap is WORTHLESS if
+it closes its laptop every 10 minutes. Placing data on it triggers
+expensive emergency re-replication, which consumes bandwidth and risks
+data loss. The reliability weight being the highest ensures the agent
+learns this lesson rapidly.
+
+Citation for multi-objective formulation: Hayes et al. (2022) [10]
+established that linear scalarization R = SUM(w_i * obj_i) is the
+standard approach for multi-objective RL. It finds solutions on the
+convex hull of the Pareto frontier.
+
+Citation for latency/cost optimization: Xing & Wang (2025) [5].
+Citation for reliability in P2P: Edge-cloud replica placement (2024) [17].
+
+7.2 Phase B: Empirical Outcome Correction (after transfer)
+------------------------------------------------------------
+
+After the Go node actually transfers the chunk, it measures the REAL
+round-trip latency and reports the outcome back to the RL agent:
+
+    R_outcome = R_immediate + (-w1 * l_actual / 100)
+                + { 0 if success; -10 if failure }
+
+This corrects the dense estimate with ground truth. The gap between
+profile-estimated and actual performance is a known challenge in
+storage optimization [6].
+
+NOVELTY: The two-phase reward (estimated dense + measured correction)
+is inspired by the RL-Storage framework [6] but adapted for P2P
+chunk transfer where empirical latency measures actual network hops,
+not just I/O latency.
+
+7.3 Phase C: Retroactive Eviction Penalty (when node dies)
+-------------------------------------------------------------
+
+When a peer node n goes offline (detected via missed heartbeats), we
+walk back through the last 200 placement decisions and apply a massive
+negative reward to every placement that targeted n:
+
+    R_eviction = -100    for all placements where n in targets
+
+This is injected into the replay buffer retroactively, allowing the
+critic to learn that past decisions to trust n were catastrophic.
+
+NOVELTY: This retroactive credit assignment mechanism is the second
+major novel contribution. It is inspired by Hindsight Experience
+Replay (HER) [7], which relabels failed trajectories as successes
+for different goals. We invert the idea: when a node dies, we relabel
+successful placements as failures.
+
+WHY -100?
+Typical dense rewards are in [-10, +2]. The penalty must be 10-50x
+larger to overwhelm accumulated positive signals and force the critic
+to learn "low uptime = catastrophic future loss." Henderson et al. [9]
+demonstrated that reward scaling significantly impacts DDPG convergence.
+
+After applying eviction penalties, we run up to 10 extra training steps
+to ensure the critic absorbs the rare, high-value signal before it gets
+diluted by future samples. This is analogous to the motivation behind
+Prioritized Experience Replay [14], which emphasizes high-TD-error
+transitions.
+
+================================================================================
+8. STEP 5: DDPG ALGORITHM
+================================================================================
+
+We use Deep Deterministic Policy Gradient (DDPG) [1] because:
+
+    1. Our action space is CONTINUOUS (score vectors in R^20)
+    2. We need OFF-POLICY learning (the replay buffer lets us learn from
+       old experiences AND retroactively injected eviction penalties)
+    3. It produces DETERMINISTIC policies (no sampling needed at inference)
+
+Citation: Lillicrap, T. P. et al. "Continuous Control with Deep
+Reinforcement Learning." ICLR 2016. [1]
+
+The Deterministic Policy Gradient Theorem [13] proves that for a
+deterministic policy mu(s), the policy gradient is:
+
+    grad_theta J = E[ grad_a Q(s, a)|_{a=mu(s)} * grad_theta mu(s) ]
+
+This allows gradient-based policy improvement in continuous action spaces
+without requiring the expensive sampling that stochastic policy gradients
+(e.g., PPO) need.
+
+Citation: Silver, D. et al. "Deterministic Policy Gradient Algorithms."
+ICML 2014. [13]
+
+WHY NOT OTHER ALGORITHMS?
+
+    DQN [2]:   Cannot handle continuous action spaces. Would require
+               discretizing the score vector into bins, losing precision.
+
+    PPO:       On-policy — cannot learn from retroactive eviction
+               penalties injected into a replay buffer. Would require
+               replaying the entire episode, which is impossible for
+               eviction events that happen hours after placement.
+
+    TD3 [3]:   A valid alternative (adds twin critics and delayed actor
+               updates). We use DDPG's simpler architecture because our
+               20-dimensional action space is small enough that TD3's
+               overestimation corrections provide marginal benefit.
+               However, our hyperparameters (tau, gamma, LR) follow
+               TD3's established defaults, which are more robust than
+               DDPG's original values [9].
+
+8.1 Network Architecture
+--------------------------
+
+DDPG maintains four neural networks:
+
+    Actor mu(s | theta_mu):
+        Input:  s in R^220  (flattened candidate features)
+        Hidden: 128 -> ReLU -> 128 -> ReLU
+        Output: a in R^20   (tanh activation, bounded to [-1, 1])
+
+    Critic Q(s, a | theta_Q):
+        Input:  [s || a] in R^240  (state concatenated with action)
+        Hidden: 128 -> ReLU -> 128 -> ReLU
+        Output: Q in R^1    (no activation, Q-values are unbounded)
+
+    Target Actor mu'(s | theta_mu'):
+        Identical architecture to Actor, weights updated via Polyak averaging
+
+    Target Critic Q'(s, a | theta_Q'):
+        Identical architecture to Critic, weights updated via Polyak averaging
+
+Hidden dimension = 128 is chosen because the original DDPG [1] used
+400/300 for high-dimensional physics tasks (state dim ~400). Our state
+dimension is 220, so 128-unit layers are sufficient. TD3 [3] used 256.
+
+================================================================================
+9. STEP 6: TRAINING PROCEDURE
+================================================================================
+
+9.1 Experience Replay Buffer
+------------------------------
+
+We store transitions (s_t, a_t, r_t, s_{t+1}, done_t) in a circular
+buffer of capacity N = 100,000.
+
+At each training step, we sample a random minibatch B of size 64:
+
+    B = {(s_i, a_i, r_i, s_i', d_i)}_{i=1}^{64}  ~  Uniform(Buffer)
+
+Random sampling breaks the temporal correlation between consecutive
+placements. Without replay, the network trains on (s_1, s_2, s_3, ...),
+which are highly correlated, destabilizing stochastic gradient descent.
+
+Citation: Experience replay was introduced by Lin (1992) [16] and
+popularized for deep RL by Mnih et al. (2015) [2].
+
+Buffer size N = 100,000: Large enough to decorrelate samples but fits
+in ~25MB of RAM. Lillicrap et al. [1] used 10^6; we use 10^5 because
+our environment is simpler (fewer state transitions per second).
+
+9.2 Critic Update
+-------------------
+
+The critic learns to predict the expected cumulative discounted reward
+(the Q-value). We minimize the temporal-difference (TD) error.
+
+Target computation (using frozen target networks):
+
+    y_i = r_i + gamma * (1 - d_i) * Q'(s_i', mu'(s_i' | theta_mu') | theta_Q')
+
+Critic loss:
+
+    L_critic = (1/|B|) * SUM_{i=1}^{|B|} (Q(s_i, a_i | theta_Q) - y_i)^2
+
+Gradient step using Adam optimizer [18] with learning rate alpha_Q = 10^{-3}:
+
+    theta_Q <- theta_Q - alpha_Q * grad_{theta_Q} L_critic
+
+9.3 Actor Update
+-------------------
+
+The actor learns to produce actions that maximize the critic's Q-value:
+
+    L_actor = -(1/|B|) * SUM_{i=1}^{|B|} Q(s_i, mu(s_i | theta_mu) | theta_Q)
+
+The negative sign means we MAXIMIZE Q. Intuitively: adjust the policy
+so the actions it produces make the critic predict higher future reward.
+
+Gradient step using Adam optimizer [18] with learning rate alpha_mu = 10^{-4}:
+
+    theta_mu <- theta_mu - alpha_mu * grad_{theta_mu} L_actor
+
+WHY is the actor learning rate 10x smaller than the critic's?
+The actor depends on the critic being accurate. If the actor updates
+too aggressively while the critic is still noisy, training diverges.
+Following TD3's recommendation [3].
+
+Citation for Adam optimizer: Kingma, D. P. & Ba, J. "Adam: A Method
+for Stochastic Optimization." ICLR 2015. [18]
+
+================================================================================
+10. STEP 7: TRUST CALIBRATION VIA RTT DIVERGENCE                    [NOVEL]
+================================================================================
+
+*** THIS IS A NOVEL CONTRIBUTION ***
+
+In a P2P network, nodes self-report their StorageProfile. A malicious
+or degraded node could claim low latency and high uptime while actually
+being slow and unreliable. We introduce a trust calibration mechanism
+that uses independently observed heartbeat RTT to verify profile claims.
+
+10.1 Trust Divergence Score
+-----------------------------
+
+For each peer at address n, we compute the divergence between their
+claimed latency l_n and our independently measured heartbeat RTT r_n:
+
+    raw_delta_n = |r_n - l_n| / max(l_n, 0.01)
+
+We maintain an exponential moving average (EMA) to avoid overreacting
+to a single noisy ping:
+
+    delta_n^(t) = alpha * raw_delta_n + (1 - alpha) * delta_n^(t-1)
+
+Where alpha = 0.3 (30% new measurement, 70% historical average).
+
+Interpretation:
+    delta ~= 0:   Node is honest. Profile matches observations.
+    delta ~= 1:   RTT is double the claimed latency. Suspicious.
+    delta >= 3:   Severely fraudulent or failing node.
+
+10.2 Integration into State and Reward
+----------------------------------------
+
+The trust divergence enters the system at TWO points:
+
+    State:  Feature f_i[10] = min(delta_i / 5, 1)
+            This lets the actor learn to avoid high-divergence nodes.
+
+    Reward: R_immediate includes -w5 * D_avg where D_avg is the
+            average trust divergence across selected nodes (w5 = 1.5).
+            This provides immediate negative feedback for selecting
+            dishonest nodes.
+
+NOVELTY: Using heartbeat RTT as an independent verification signal
+for self-reported storage profiles is new in the context of RL-based
+placement. Existing P2P trust systems (EigenTrust [8]) compute trust
+from transaction success/failure ratios. Our approach is:
+
+    1. Faster: trust signal arrives every heartbeat cycle (~5-10s),
+       not after each file transaction (which may be rare).
+
+    2. Hardware-grounded: RTT directly measures network performance,
+       not just file delivery success.
+
+    3. Continuous: produces a real-valued divergence score, not a
+       binary trust/distrust decision.
+
+Citation: Kamvar, S. D. et al. "The EigenTrust Algorithm for Reputation
+Management in P2P Networks." WWW 2003. [8]
+
+WHY alpha = 0.3 (more aggressive than typical EMA)?
+In P2P, profile fraud needs to be detected QUICKLY before too much data
+is placed on a dishonest node. Standard EMA alpha = 0.1 would take ~20
+heartbeat cycles to react. alpha = 0.3 reacts within ~5 cycles.
+
+================================================================================
+11. STEP 8: RETROACTIVE EVICTION PENALTY                            [NOVEL]
+================================================================================
+
+*** THIS IS A NOVEL CONTRIBUTION ***
+
+The standard RL reward loop provides feedback only at placement time.
+But the MOST IMPORTANT event — a node dying and data being lost —
+happens minutes or hours AFTER the placement decision. This is the
+classic "sparse reward" problem in RL.
+
+11.1 Mechanism
+---------------
+
+When node n is evicted (detected via consecutive missed heartbeats),
+we execute the following:
+
+    1. Walk through the last 200 entries in placement_history
+    2. For each placement P where n is in P.targets:
+       a. Inject (P.state, P.action, -100, P.state, done=True) into
+          the replay buffer
+       b. Increment penalties_applied counter
+    3. If penalties_applied > 0:
+       Run min(penalties_applied, 10) extra gradient steps immediately
+
+The -100 reward (compared to typical rewards in [-10, +2]) creates an
+overwhelmingly negative association between the state features of the
+dead node (low uptime, high RTT, high divergence) and the Q-value.
+
+11.2 Why This Works
+---------------------
+
+After several eviction events, the critic network has seen enough
+(state, action, -100) tuples to learn:
+
+    Q(s, a) << 0    when a selects nodes with low u_i
+
+This propagates through the actor update. The actor will output low
+scores for candidates with low uptime, effectively deprioritizing them
+before they even die.
+
+NOVELTY: This retroactive credit assignment mechanism is inspired by
+Hindsight Experience Replay [7] but INVERTED:
+
+    HER:  Failed trajectory -> relabel as success for a different goal
+    OURS: Successful placement -> relabel as catastrophic failure
+          when the target node dies
+
+HER relabels to create positive learning signal from failures.
+We relabel to create negative learning signal from delayed failures.
+The mathematical structure is identical — retroactive experience
+injection into an off-policy replay buffer.
+
+Citation: Andrychowicz, M. et al. "Hindsight Experience Replay."
+NeurIPS 2017. [7]
+
+Citation for extra training after high-value signals: Schaul, T. et al.
+"Prioritized Experience Replay." ICLR 2016. [14] — motivates
+emphasizing rare, high-TD-error transitions.
+
+================================================================================
+12. STEP 9: HEURISTIC BOOTSTRAP (WARMUP)
+================================================================================
+
+For the first 500 placements (total_steps < WARMUP_STEPS), the neural
+network has not seen enough data to produce meaningful scores. We use a
+hand-crafted heuristic:
+
+    score(c_i) = 2 * u_i - 0.1 * l_i - 10 * p_i
+
+This prioritizes:
+    High uptime:    +2 per unit of uptime_ratio
+    Low latency:    -0.1 per ms of latency
+    Low cost:       -10 per $/GB/hour
+
+The heuristic provides reasonable day-1 performance while the replay
+buffer fills with diverse experiences. After 500 steps (when the buffer
+has 500 / 64 ~= 8x the batch size worth of samples), the trained actor
+takes over.
+
+Citation: Using warmup with random or heuristic actions before training
+is standard practice in DDPG [1] and TD3 [3].
+
+================================================================================
+13. STEP 10: SOFT TARGET NETWORK UPDATES
+================================================================================
+
+After every gradient step, we blend the main network weights into the
+target networks using Polyak averaging:
+
+    theta_Q'  <- tau * theta_Q  + (1 - tau) * theta_Q'
+    theta_mu' <- tau * theta_mu + (1 - tau) * theta_mu'
+
+Where tau = 0.005 (only 0.5% new weights per step).
+
+WHY?
+The bootstrapped target y_i uses the target networks Q' and mu'. If
+these changed as fast as the main networks, the target would shift
+under the critic's feet, causing oscillation and divergence. Slow
+blending provides a stable reference point.
+
+Citation: Lillicrap et al. [1] introduced soft updates for DDPG.
+Polyak averaging originates from Polyak & Juditsky (1992) [15].
+TD3 [3] established tau = 0.005 as more robust than DDPG's original
+tau = 0.001.
+
+================================================================================
+14. EXPLORATION: ORNSTEIN-UHLENBECK NOISE
+================================================================================
+
+For exploration during training, we add temporally correlated noise
+to the actor's output using the Ornstein-Uhlenbeck process:
+
+    n_{t+1} = n_t + theta * (mu - n_t) + sigma * N(0, 1)
+
+Where:
+    mu    = 0       (mean reversion target)
+    theta = 0.15    (mean reversion speed)
+    sigma = 0.2     (noise magnitude)
+
+The noisy action:
+
+    a_t^noisy = mu(s_t | theta_mu) + n_t
+
+WHY OU NOISE instead of Gaussian?
+OU noise is autocorrelated — if the agent explored "prefer SSD nodes"
+last step, it will keep exploring in that direction next step. This
+produces coherent multi-step exploration trajectories. Simple Gaussian
+noise (N(0, 0.1)) jitters randomly each step, which is less effective
+for exploring consistent placement strategies.
+
+Citation: The OU process was originally described in physics by
+Uhlenbeck & Ornstein (1930) [12] and adopted for DDPG by Lillicrap
+et al. [1]. TD3 [3] showed that Gaussian noise works equally well
+in some environments — we chose OU because placement benefits from
+directional exploration.
+
+================================================================================
+15. NOVELTY SUMMARY
+================================================================================
+
+The following aspects of this work are NOVEL contributions:
+
++-------+----------------------------------------------+------------------+
+| Step  | Contribution                                 | Builds Upon      |
++-------+----------------------------------------------+------------------+
+|   4   | 5-objective reward function for P2P chunk     | [5] (3 obj for   |
+|       | placement: latency + cost + reliability +     |  centralized     |
+|       | capacity + trust, with reliability as the     |  storage)        |
+|       | dominant objective (w3 = 2.0)                 |                  |
++-------+----------------------------------------------+------------------+
+|   7   | Trust calibration via heartbeat RTT           | [8] (EigenTrust  |
+|       | divergence: using independently observed RTT  |  uses binary     |
+|       | to verify self-reported profiles in real-time |  transaction     |
+|       | with EMA smoothing (alpha = 0.3)              |  success/fail)   |
++-------+----------------------------------------------+------------------+
+|   8   | Inverted HER for eviction: retroactively      | [7] (HER turns   |
+|       | injecting -100 penalty into the replay buffer |  failures into   |
+|       | for all past placements on a dead node,       |  successes; we   |
+|       | solving credit assignment across time         |  do the inverse) |
++-------+----------------------------------------------+------------------+
+|  All  | End-to-end integration: RL sidecar running    | [6] (RL-Storage  |
+|       | alongside a real P2P distributed file system  |  optimizes       |
+|       | (not a simulation), with graceful fallback    |  centralized     |
+|       | to Kademlia DHT when the agent is unavailable |  kernels)        |
++-------+----------------------------------------------+------------------+
+
+================================================================================
+16. COMPLETE HYPERPARAMETER TABLE
+================================================================================
+
++--------------------------+--------+------------------------------+---------+
+| Parameter                | Value  | Justification                | Citation|
++--------------------------+--------+------------------------------+---------+
+| gamma (discount)         | 0.99   | Long horizon: placement      | [1],[3] |
+|                          |        | affects future re-replication |         |
+| alpha_mu (actor LR)      | 1e-4   | Slow: depends on critic      | [3]     |
+| alpha_Q (critic LR)      | 1e-3   | 10x faster than actor        | [3]     |
+| tau (soft update)        | 0.005  | Stable targets               | [3],[15]|
+| Batch size               | 64     | Standard for small networks  | [1]     |
+| Replay buffer            | 100000 | ~5-10x expected episodes     | [1]     |
+| Hidden dim               | 128    | Sufficient for 220-dim input | [1],[3] |
+| Hidden layers            | 2      | Standard depth for DDPG      | [1]     |
+| Warmup steps             | 500    | ~8x batch size of diversity  | [1]     |
+| K_max (candidates)       | 20     | Kademlia bucket size         | [4]     |
+| Features per candidate   | 11     | Covers 3 objectives + trust  | [5]     |
+| OU theta                 | 0.15   | Mean reversion speed         | [1],[12]|
+| OU sigma                 | 0.2    | Exploration magnitude        | [1]     |
+| w1 (latency)             | 1.0    | Baseline priority            | [5]     |
+| w2 (cost)                | 0.5    | Secondary to latency         | [5]     |
+| w3 (reliability)         | 2.0    | Dominant: churn is P2P killer| [17]    |
+| w4 (capacity)            | 0.1    | Prevent over-concentration   | [5]     |
+| w5 (trust)               | 1.5    | Penalize fraudulent profiles | [8]     |
+| Eviction penalty         | -100   | 10-50x typical reward        | [7],[9] |
+| Trust EMA alpha          | 0.3    | Fast reaction to fraud       | [8]     |
+| Placement history        | 1000   | Lookback for eviction penalty| [7]     |
+| Eviction lookback        | 200    | ~10 min of placement history |         |
++--------------------------+--------+------------------------------+---------+
+
+================================================================================
+17. REFERENCES
+================================================================================
+
+[1]  T. P. Lillicrap, J. J. Hunt, A. Pritzel, N. Heess, T. Erez,
+     Y. Tassa, D. Silver, and D. Wierstra, "Continuous control with
+     deep reinforcement learning," in Proc. ICLR, 2016.
+     arXiv:1509.02971.
+
+[2]  V. Mnih, K. Kavukcuoglu, D. Silver, A. A. Rusu, J. Veness, et al.,
+     "Human-level control through deep reinforcement learning," Nature,
+     vol. 518, no. 7540, pp. 529-533, 2015.
+
+[3]  S. Fujimoto, H. van Hoof, and D. Meger, "Addressing function
+     approximation error in actor-critic methods," in Proc. ICML, 2018.
+     arXiv:1802.09477.
+
+[4]  P. Maymounkov and D. Mazieres, "Kademlia: A peer-to-peer information
+     system based on the XOR metric," in Proc. IPTPS, 2002.
+
+[5]  S. Xing and Y. Wang, "Proactive data placement in heterogeneous
+     storage systems via predictive multi-objective reinforcement
+     learning," IEEE Access, 2025. doi:10.1109/ACCESS.2025.3586378.
+
+[6]  C. Cheng, C. Zhou, and Y. Zhao, "Dynamic optimization of storage
+     systems using reinforcement learning techniques," arXiv:2501.00068,
+     2024.
+
+[7]  M. Andrychowicz, F. Wolski, A. Ray, J. Schneider, R. Fong, et al.,
+     "Hindsight experience replay," in Proc. NeurIPS, 2017.
+     arXiv:1707.01495.
+
+[8]  S. D. Kamvar, M. T. Schlosser, and H. Garcia-Molina, "The
+     EigenTrust algorithm for reputation management in P2P networks,"
+     in Proc. WWW, 2003.
+
+[9]  P. Henderson, R. Islam, P. Bachman, J. Pineau, D. Precup, and
+     D. Meger, "Deep reinforcement learning that matters," in Proc.
+     AAAI, 2018. arXiv:1709.06560.
+
+[10] C. F. Hayes, R. Radulescu, E. Howley, et al., "A practical guide
+     to multi-objective reinforcement learning and planning," Auton.
+     Agents Multi-Agent Syst., vol. 36, no. 26, 2022.
+
+[11] R. S. Sutton and A. G. Barto, Reinforcement Learning: An
+     Introduction, 2nd ed. Cambridge, MA: MIT Press, 2018.
+
+[12] G. E. Uhlenbeck and L. S. Ornstein, "On the theory of the
+     Brownian motion," Phys. Rev., vol. 36, no. 5, pp. 823-841, 1930.
+
+[13] D. Silver, G. Lever, N. Heess, T. Degris, D. Wierstra, and
+     M. Riedmiller, "Deterministic policy gradient algorithms," in
+     Proc. ICML, 2014.
+
+[14] T. Schaul, J. Quan, I. Antonoglou, and D. Silver, "Prioritized
+     experience replay," in Proc. ICLR, 2016. arXiv:1511.05952.
+
+[15] B. T. Polyak and A. B. Juditsky, "Acceleration of stochastic
+     approximation by averaging," SIAM J. Control Optim., vol. 30,
+     no. 4, pp. 838-855, 1992.
+
+[16] L.-J. Lin, "Self-improving reactive agents based on reinforcement
+     learning, planning, and teaching," Mach. Learn., vol. 8, no. 3-4,
+     pp. 293-321, 1992.
+
+[17] "A balanced and reliable data replica placement scheme based on
+     reinforcement learning in edge-cloud environments," J. Cloud
+     Computing, 2024.
+
+[18] D. P. Kingma and J. Ba, "Adam: A method for stochastic
+     optimization," in Proc. ICLR, 2015. arXiv:1412.6980.
+
+================================================================================
+                                    END
+================================================================================
