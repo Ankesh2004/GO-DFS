@@ -55,6 +55,8 @@ func (s *FileServer) DeleteFile(cid string) error {
 		if s.Store.Has(key) {
 			if err := s.Store.DeleteStream(key); err != nil {
 				fmt.Printf("[%s] Warning: failed to delete local bytes for %s: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
+			} else {
+				s.ChunkLedger.Remove(key)
 			}
 		}
 	}
@@ -144,6 +146,7 @@ func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
 			if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
 				fmt.Printf("[%s] Warning: failed to delete bytes for %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 			} else {
+				s.ChunkLedger.Remove(t.ChunkKey)
 				fmt.Printf("[%s] Deleted chunk %s (tombstoned by peer)\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16))
 			}
 		}
@@ -191,6 +194,8 @@ func (s *FileServer) handleTombstoneSync(_ string, msg MessageTombstoneSync) err
 		if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
 			fmt.Printf("[%s] Warning: failed to delete bytes for synced tombstone %s: %v\n",
 				s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+		} else {
+			s.ChunkLedger.Remove(t.ChunkKey)
 		}
 	}
 
@@ -235,6 +240,7 @@ func (s *FileServer) runGC() {
 				fmt.Printf("[%s] GC: failed to delete %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 				continue
 			}
+			s.ChunkLedger.Remove(t.ChunkKey)
 			cleaned++
 		}
 	}

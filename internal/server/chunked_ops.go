@@ -90,6 +90,7 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 			return fmt.Errorf("failed to store relay stream data for %s: %w", meta.Key, err)
 		}
 		fmt.Printf("[%s] Stored relay stream chunk %s: %d bytes (verified)\n", s.Transport.Addr(), meta.Key, n)
+		s.ChunkLedger.Add(meta.Key)
 		s.notifyChunkArrived(meta.Key)
 		return nil
 	}
@@ -217,6 +218,7 @@ func (s *FileServer) handleStoreManifest(from string, msg MessageStoreManifest) 
 		return fmt.Errorf("failed to store manifest: %w", err)
 	}
 	fmt.Printf("[%s] Manifest %s stored: %d bytes\n", s.Transport.Addr(), msg.Key, n)
+	s.ChunkLedger.Add(msg.Key)
 	return nil
 }
 
@@ -396,6 +398,7 @@ func (s *FileServer) handleChunkData(from string, msg MessageChunkData) error {
 	}
 	fmt.Printf("[%s] Stored chunk %s (%d bytes, verified) from %s\n",
 		s.Transport.Addr(), msg.ChunkKey[:16], n, from)
+	s.ChunkLedger.Add(msg.ChunkKey)
 	s.notifyChunkArrived(msg.ChunkKey)
 	return nil
 }
@@ -653,6 +656,13 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 		Size:         totalSize,
 		ChunkCount:   len(chunks),
 	})
+
+	// track every chunk + manifest in the ledger so this node
+	// can audit them even if we're not the original uploader
+	for _, ck := range chunkKeys {
+		s.ChunkLedger.Add(ck)
+	}
+	s.ChunkLedger.Add(manifestKey)
 
 	return cid, nil
 }

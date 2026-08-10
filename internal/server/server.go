@@ -44,7 +44,8 @@ type FileServer struct {
 	addrMap       map[string]string // raw TCP remote addr --> advertised listen addr
 	relayPeers    map[string]bool   // map of advertised addrs that are RelayOnly=true
 	pendingChunks sync.Map          // chunkKey --> chan struct{}, signals when a requested chunk arrives
-	CIDIndex      *storage.CIDIndex // local index mapping CID --> original filename
+	CIDIndex      *storage.CIDIndex    // local index mapping CID --> original filename
+	ChunkLedger   *storage.ChunkLedger // tracks ALL chunk keys on disk (uploaded + replicas)
 
 	// peer storage profiles for RL placement decisions.
 	// populated during PeerExchange -- maps advertise addr to hardware fingerprint.
@@ -92,6 +93,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		addrMap:           make(map[string]string),
 		relayPeers:        make(map[string]bool),
 		CIDIndex:          storage.NewCIDIndex(options.RootDir),
+		ChunkLedger:       storage.NewChunkLedger(options.RootDir),
 		peerProfiles:      make(map[string]StorageProfile),
 		peerHealth:        make(map[string]*PeerHealth),
 		HeartbeatInterval: DefaultHeartbeatInterval,
