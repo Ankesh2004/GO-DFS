@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -334,42 +335,37 @@ func (s *FileServer) runReplicationAudit() {
 	}
 	defer s.auditLock.Unlock()
 
-	entries := s.CIDIndex.List()
-	if len(entries) == 0 {
+	// ---- THE FIX: iterate the chunk ledger instead of CIDIndex ----
+	// CIDIndex only has files WE uploaded. the ledger has EVERY chunk
+	// on our disk — including replicas from other nodes. this means
+	// if the original uploader dies, WE can still detect and fix
+	// under-replication for those chunks.
+	allChunks := s.ChunkLedger.All()
+	if len(allChunks) == 0 {
 		return
 	}
 
-	// ---- Phase 1: collect all chunk keys from our manifests ----
-	// also build an ownership set so we don't have to re-read manifests
-	// later in handleOverReplication / handleDropChunk for each chunk.
-	var allChunks []string
-	ownedChunks := make(map[string]bool)
-	for _, entry := range entries {
-		manifestKey := entry.CID + ".manifest"
-		manifest, err := s.loadManifest(manifestKey)
-		if err != nil {
+	// filter out tombstoned chunks and manifests — manifests aren't
+	// independently replicated, they ride along with the file's chunks
+	filtered := make([]string, 0, len(allChunks))
+	for _, ck := range allChunks {
+		if s.Tombstones.IsDead(ck) || strings.HasSuffix(ck, ".manifest") {
 			continue
 		}
-		for _, chunkKey := range manifest.ChunkKeys {
-			if s.Tombstones.IsDead(chunkKey) {
-				continue
-			}
-			// dedup — CAS means multiple files can reference the same chunk.
-			// without this check the same chunk gets audited/pushed/dropped twice.
-			if ownedChunks[chunkKey] {
-				continue
-			}
-			allChunks = append(allChunks, chunkKey)
-			ownedChunks[chunkKey] = true
-		}
+		filtered = append(filtered, ck)
 	}
+	allChunks = filtered
 
 	if len(allChunks) == 0 {
 		return
 	}
 
-	fmt.Printf("[%s] Replication audit: checking %d chunks across %d files\n",
-		s.Transport.Addr(), len(allChunks), len(entries))
+	// pre-compute which chunks belong to files we uploaded.
+	// handleOverReplication uses this to avoid dropping our own files' chunks.
+	ownedChunks := s.buildOwnedChunkSet()
+
+	fmt.Printf("[%s] Replication audit: checking %d chunks (%d owned by us)\n",
+		s.Transport.Addr(), len(allChunks), len(ownedChunks))
 
 	// ---- Phase 1b: send ONE batch query per peer, collect ALL responses ----
 	// now returns a map of chunkKey -> set of holder addresses, not just counts.
@@ -422,6 +418,24 @@ func (s *FileServer) runReplicationAudit() {
 	for _, a := range overActions {
 		s.handleOverReplication(a.key, a.holders, ownedChunks)
 	}
+}
+
+// buildOwnedChunkSet returns a set of chunk keys that belong to files
+// this node uploaded. used during over-replication to make sure we
+// never drop chunks from our own files — only excess replicas we're
+// holding for someone else.
+func (s *FileServer) buildOwnedChunkSet() map[string]bool {
+	owned := make(map[string]bool)
+	for _, entry := range s.CIDIndex.List() {
+		manifest, err := s.loadManifest(entry.CID + ".manifest")
+		if err != nil {
+			continue
+		}
+		for _, ck := range manifest.ChunkKeys {
+			owned[ck] = true
+		}
+	}
+	return owned
 }
 
 // batchAuditChunks sends ONE query per peer with ALL chunk keys,
@@ -620,6 +634,9 @@ func (s *FileServer) handleOverReplication(chunkKey string, holders holderSet, o
 				fmt.Printf("[%s] Failed to drop our chunk %s: %v\n",
 					s.Transport.Addr(), truncateKey(chunkKey, 16), err)
 			} else {
+				if err := s.ChunkLedger.Remove(chunkKey); err != nil {
+					fmt.Printf("[%s] Warning: failed to remove dropped chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(chunkKey, 16), err)
+				}
 				dropped++
 			}
 		} else {
@@ -755,6 +772,7 @@ func (s *FileServer) handleDropChunk(_ string, msg MessageDropChunk) error {
 	if err := s.Store.DeleteStream(msg.ChunkKey); err != nil {
 		return fmt.Errorf("failed to drop chunk %s: %w", truncateKey(msg.ChunkKey, 16), err)
 	}
+	s.ChunkLedger.Remove(msg.ChunkKey)
 
 	fmt.Printf("[%s] Dropped chunk %s (over-replicated, freed up space)\n",
 		s.Transport.Addr(), truncateKey(msg.ChunkKey, 16))

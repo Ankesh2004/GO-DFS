@@ -90,6 +90,9 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 			return fmt.Errorf("failed to store relay stream data for %s: %w", meta.Key, err)
 		}
 		fmt.Printf("[%s] Stored relay stream chunk %s: %d bytes (verified)\n", s.Transport.Addr(), meta.Key, n)
+		if err := s.ChunkLedger.Add(meta.Key); err != nil {
+			fmt.Printf("[%s] Warning: failed to add relay chunk to ledger: %v\n", s.Transport.Addr(), err)
+		}
 		s.notifyChunkArrived(meta.Key)
 		return nil
 	}
@@ -217,6 +220,9 @@ func (s *FileServer) handleStoreManifest(from string, msg MessageStoreManifest) 
 		return fmt.Errorf("failed to store manifest: %w", err)
 	}
 	fmt.Printf("[%s] Manifest %s stored: %d bytes\n", s.Transport.Addr(), msg.Key, n)
+	if err := s.ChunkLedger.Add(msg.Key); err != nil {
+		fmt.Printf("[%s] Warning: failed to add manifest to ledger: %v\n", s.Transport.Addr(), err)
+	}
 	return nil
 }
 
@@ -396,6 +402,9 @@ func (s *FileServer) handleChunkData(from string, msg MessageChunkData) error {
 	}
 	fmt.Printf("[%s] Stored chunk %s (%d bytes, verified) from %s\n",
 		s.Transport.Addr(), msg.ChunkKey[:16], n, from)
+	if err := s.ChunkLedger.Add(msg.ChunkKey); err != nil {
+		fmt.Printf("[%s] Warning: failed to add chunk to ledger: %v\n", s.Transport.Addr(), err)
+	}
 	s.notifyChunkArrived(msg.ChunkKey)
 	return nil
 }
@@ -518,6 +527,11 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 		totalSize += c.Size
 	}
 
+	// register chunks in the ledger immediately since they are now on disk
+	if err := s.ChunkLedger.AddBatch(chunkKeys); err != nil {
+		fmt.Printf("[%s] Warning: failed to batch add chunks to ledger: %v\n", s.Transport.Addr(), err)
+	}
+
 	manifest := FileManifest{
 		OriginalKey: originalName, // human-readable name, not the network key
 		TotalSize:   totalSize,
@@ -533,6 +547,10 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 	}
 	if _, err := s.Store.WriteStream(manifestKey, &manifestBuf); err != nil {
 		return "", fmt.Errorf("failed to store manifest: %w", err)
+	}
+	
+	if err := s.ChunkLedger.Add(manifestKey); err != nil {
+		fmt.Printf("[%s] Warning: failed to add manifest to ledger: %v\n", s.Transport.Addr(), err)
 	}
 
 	fmt.Printf("[%s] File stored: CID=%s, name=%s, %d chunks, %d bytes\n",
