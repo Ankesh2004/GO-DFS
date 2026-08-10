@@ -506,7 +506,11 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 	tee := io.TeeReader(pr, hasher)
 
 	chunks, err := s.Store.ChunkAndStore(tee, storage.DefaultChunkSize)
-	pr.Close()
+	if err != nil {
+		pr.CloseWithError(err)
+	} else {
+		pr.Close()
+	}
 
 	if err != nil {
 		return "", fmt.Errorf("chunking failed: %w", err)

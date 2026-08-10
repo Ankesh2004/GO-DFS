@@ -25,6 +25,11 @@ const (
 	DefaultFailureThreshold  = 3
 	DefaultAuditInterval     = 60 * time.Second
 	DefaultAuditTimeout      = 3 * time.Second
+
+	// max chunk keys per audit message. each key is 64 hex chars + gob overhead,
+	// roughly ~80 bytes/key. 500 * 80 = 40KB per message — stays way under the
+	// 2MB MaxMessageSize even after relay double-wrapping adds its own overhead.
+	AuditBatchSize = 500
 )
 
 // PeerHealth tracks whether a peer is alive or ghosting us.
@@ -438,10 +443,12 @@ func (s *FileServer) buildOwnedChunkSet() map[string]bool {
 	return owned
 }
 
-// batchAuditChunks sends ONE query per peer with ALL chunk keys,
-// collects responses, and returns a map of chunkKey -> set of holder addrs.
-// this replaces the old per-chunk auditChunkReplicas that was O(n × 3s).
-// now it's just ONE 3s timeout for the entire batch.
+// batchAuditChunks queries peers about which chunks they hold and returns
+// a map of chunkKey -> set of holder addresses.
+//
+// chunk keys are sent in pages of AuditBatchSize to stay under the 2MB
+// MaxMessageSize wire limit. all pages share the same auditID so responses
+// merge into a single result map regardless of how many pages were sent.
 func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]holderSet {
 	idBytes := make([]byte, 8)
 	rand.Read(idBytes)
@@ -464,15 +471,7 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]holderSet {
 		}
 	}
 
-	// send ONE batch query to each connected peer
-	askMsg := &Message{
-		Payload: MessageBatchChunkQuery{
-			ChunkKeys: chunkKeys,
-			AuditID:   auditID,
-			ReplyAddr: s.AdvertiseAddr,
-		},
-	}
-
+	// figure out who to ask
 	s.peersLock.Lock()
 	var targets []string
 	for addr := range s.peers {
@@ -482,11 +481,29 @@ func (s *FileServer) batchAuditChunks(chunkKeys []string) map[string]holderSet {
 	}
 	s.peersLock.Unlock()
 
-	for _, addr := range targets {
-		s.sendToAddr(addr, askMsg)
+	// send chunk keys in pages so we don't blow past MaxMessageSize.
+	// each page is its own message but shares the auditID, so all
+	// responses land in the same batchAudit collector.
+	for start := 0; start < len(chunkKeys); start += AuditBatchSize {
+		end := start + AuditBatchSize
+		if end > len(chunkKeys) {
+			end = len(chunkKeys)
+		}
+		page := chunkKeys[start:end]
+
+		askMsg := &Message{
+			Payload: MessageBatchChunkQuery{
+				ChunkKeys: page,
+				AuditID:   auditID,
+				ReplyAddr: s.AdvertiseAddr,
+			},
+		}
+		for _, addr := range targets {
+			s.sendToAddr(addr, askMsg)
+		}
 	}
 
-	// single timeout for ALL responses — not per-chunk anymore!
+	// single timeout for ALL responses across all pages
 	select {
 	case <-time.After(s.AuditTimeout):
 	case <-s.quitChannel:
@@ -694,7 +711,8 @@ func (s *FileServer) isOwnedChunk(chunkKey string) bool {
 // -------- Message Handlers --------
 
 // handleBatchChunkQuery responds to a batched "which of these chunks do you have?" query.
-// checks all requested chunks in one pass and sends back one response.
+// checks all requested chunks in one pass and sends back paginated responses
+// to avoid blowing past MaxMessageSize when we hold a lot of the queried chunks.
 func (s *FileServer) handleBatchChunkQuery(from string, msg MessageBatchChunkQuery) error {
 	if s.RelayOnly {
 		return nil
@@ -708,20 +726,30 @@ func (s *FileServer) handleBatchChunkQuery(from string, msg MessageBatchChunkQue
 		}
 	}
 
-	// only reply if we actually have something — no point sending an empty response
 	if len(held) == 0 {
 		return nil
 	}
 
-	response := &Message{
-		Payload: MessageBatchChunkResponse{
-			AuditID:    msg.AuditID,
-			HeldChunks: held,
-			HolderAddr: s.AdvertiseAddr,
-		},
-	}
+	// send responses in pages so a node holding thousands of chunks
+	// doesn't create a single giant message that gets rejected
+	for start := 0; start < len(held); start += AuditBatchSize {
+		end := start + AuditBatchSize
+		if end > len(held) {
+			end = len(held)
+		}
 
-	return s.sendToAddr(msg.ReplyAddr, response)
+		response := &Message{
+			Payload: MessageBatchChunkResponse{
+				AuditID:    msg.AuditID,
+				HeldChunks: held[start:end],
+				HolderAddr: s.AdvertiseAddr,
+			},
+		}
+		if err := s.sendToAddr(msg.ReplyAddr, response); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleBatchChunkResponse merges a peer's batch response into our audit state.

@@ -8,10 +8,12 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// generateKeyAndNonce creates random key and nonce for testing
+// generateKeyAndNonce creates random key and nonce for testing.
+// uses our NonceSize (24 bytes for XChaCha20), not chacha20poly1305.NonceSize
+// which is the 12-byte variant we migrated away from.
 func generateKeyAndNonce() ([]byte, []byte, error) {
 	key := make([]byte, chacha20poly1305.KeySize)
-	nonce := make([]byte, chacha20poly1305.NonceSize)
+	nonce := make([]byte, NonceSize)
 	if _, err := rand.Read(key); err != nil {
 		return nil, nil, err
 	}

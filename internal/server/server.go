@@ -109,6 +109,28 @@ func NewFileServer(options FileServerOptions) *FileServer {
 	s.Optimizer = NewPlacementOptimizer(options.RLSidecarURL)
 	s.Metrics = NewPlacementMetrics()
 
+	// give the routing table a way to check if a node is alive
+	// so it can do proper Kademlia eviction instead of silently
+	// dropping new nodes when a bucket is full.
+	// we use the heartbeat health data rather than doing a synchronous
+	// ping here — avoids blocking AddNode for seconds on network I/O.
+	s.DHT.RoutingTable.PingNode = func(addr string) bool {
+		s.healthLock.Lock()
+		health, exists := s.peerHealth[addr]
+		s.healthLock.Unlock()
+
+		if !exists {
+			// never seen this node in heartbeats — it's probably dead or
+			// was never a real peer. safe to evict.
+			return false
+		}
+
+		// if it responded to a heartbeat recently, it's alive.
+		// "recently" = within 2 heartbeat intervals — gives some slack
+		// for temporary network hiccups.
+		return time.Since(health.LastSeen) < 2*s.HeartbeatInterval
+	}
+
 	// Rebuild chunk ledger if it was missing or corrupted
 	if needsRebuild {
 		fmt.Printf("[Server %s] ChunkLedger missing or corrupt, rebuilding from CIDIndex...\n", s.AdvertiseAddr)
