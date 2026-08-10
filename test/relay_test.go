@@ -141,12 +141,12 @@ func TestThreeNodeRelay(t *testing.T) {
 		t.Fatalf("Read failure: %v", err)
 	}
 
-	if len(blob) < 12 {
+	if len(blob) < crypto.NonceSize {
 		t.Fatalf("Blob too small: %d", len(blob))
 	}
-	nonce := blob[:12]
+	nonce := blob[:crypto.NonceSize]
 	decryptedBuf := new(bytes.Buffer)
-	if _, err := crypto.Decrypt(userKey, nonce, bytes.NewReader(blob[12:]), decryptedBuf); err != nil {
+	if _, err := crypto.Decrypt(userKey, nonce, bytes.NewReader(blob[crypto.NonceSize:]), decryptedBuf); err != nil {
 		t.Fatalf("Decryption failure on S3: %v", err)
 	}
 

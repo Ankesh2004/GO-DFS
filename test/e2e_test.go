@@ -88,13 +88,13 @@ func TestEndToEndIntegrity(t *testing.T) {
 		closer.Close()
 	}
 
-	if len(encryptedBlob) < 12 {
-		t.Fatalf("Received blob too small: %d", len(encryptedBlob))
+	if len(encryptedBlob) < crypto.NonceSize {
+		t.Fatalf("Blob too small: %d", len(encryptedBlob))
 	}
-	nonce := encryptedBlob[:12]
-
+	nonce := encryptedBlob[:crypto.NonceSize]
 	decryptedBuf := new(bytes.Buffer)
-	if _, err := crypto.Decrypt(userKey, nonce, bytes.NewReader(encryptedBlob[12:]), decryptedBuf); err != nil {
+
+	if _, err := crypto.Decrypt(userKey, nonce, bytes.NewReader(encryptedBlob[crypto.NonceSize:]), decryptedBuf); err != nil {
 		t.Fatalf("Client-side decryption failed: %v", err)
 	}
 

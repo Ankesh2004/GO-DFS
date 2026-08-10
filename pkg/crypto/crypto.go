@@ -13,7 +13,7 @@ import (
 // FOR TESTING : WE ARE CURRENTLY HAVING KEY ON SERVER , LATER DO AN KEY MGMT SERVICE OR SOMETHING (TODO)
 
 const (
-	NonceSize    = 12
+	NonceSize    = 24
 	MaxFrameSize = 32 * 1024 // 32KB chunks
 )
 
@@ -25,7 +25,7 @@ func Encrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", NonceSize, len(nonce))
 	}
 
-	aead, err := chacha20poly1305.New(key)
+	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return 0, err
 	}
@@ -77,7 +77,7 @@ func Decrypt(key []byte, nonce []byte, src io.Reader, dst io.Writer) (int64, err
 		return 0, fmt.Errorf("invalid nonce size: expected %d, got %d", NonceSize, len(nonce))
 	}
 
-	aead, err := chacha20poly1305.New(key)
+	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return 0, err
 	}
