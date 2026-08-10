@@ -393,18 +393,56 @@ func (s *FileServer) handleRelay(from string, msg MessageRelay) error {
 
 	// We're not the target — forward it to the actual destination
 	s.peersLock.Lock()
-	targetPeer, ok := s.peers[msg.TargetAddr]
+	targetPeer, directlyConnected := s.peers[msg.TargetAddr]
 	s.peersLock.Unlock()
 
-	if !ok {
-		return fmt.Errorf("[%s] can't relay to %s: not in our peer list", s.Transport.Addr(), msg.TargetAddr)
-	}
-
-	// Decrement TTL and forward
 	msg.TTL--
 	relayMsg := Message{Payload: msg}
-	fmt.Printf("[%s] Relaying message from %s → %s (TTL: %d)\n", s.Transport.Addr(), msg.OriginAddr, msg.TargetAddr, msg.TTL)
-	return s.sendToPeer(targetPeer, &relayMsg)
+
+	if directlyConnected {
+		fmt.Printf("[%s] Relaying message from %s → %s (TTL: %d)\n", s.Transport.Addr(), msg.OriginAddr, msg.TargetAddr, msg.TTL)
+		return s.sendToPeer(targetPeer, &relayMsg)
+	}
+
+	// Multi-hop relay: we don't have a direct connection to the target.
+	// Consult the DHT to find a closer node that we ARE connected to.
+	targetID := dht.NewID(msg.TargetAddr)
+	closest := s.DHT.NearestNodes(targetID, dht.K)
+
+	for _, node := range closest {
+		if node.Addr == s.AdvertiseAddr || node.Addr == from {
+			continue // don't send to ourselves or back where it came from
+		}
+
+		s.peersLock.Lock()
+		peer, connected := s.peers[node.Addr]
+		s.peersLock.Unlock()
+
+		if connected {
+			fmt.Printf("[%s] Multi-hop relaying message from %s → %s (TTL: %d) via %s\n", s.Transport.Addr(), msg.OriginAddr, msg.TargetAddr, msg.TTL, node.Addr)
+			if err := s.sendToPeer(peer, &relayMsg); err == nil {
+				return nil
+			}
+		}
+	}
+
+	// Fallback: try ANY connected peer except the sender
+	s.peersLock.Lock()
+	var fallbackPeers []p2p.Peer
+	for addr, p := range s.peers {
+		if addr != from {
+			fallbackPeers = append(fallbackPeers, p)
+		}
+	}
+	s.peersLock.Unlock()
+
+	for _, p := range fallbackPeers {
+		if err := s.sendToPeer(p, &relayMsg); err == nil {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("[%s] can't relay to %s: no route found", s.Transport.Addr(), msg.TargetAddr)
 }
 
 // sendToAddr sends a message to a target address. If we have a direct connection,
@@ -437,16 +475,38 @@ func (s *FileServer) sendToAddr(targetAddr string, msg *Message) error {
 		},
 	}
 
-	// Try each connected peer as a potential relay
+	// Consult the DHT to find a closer node that we ARE connected to.
+	targetID := dht.NewID(targetAddr)
+	closest := s.DHT.NearestNodes(targetID, dht.K)
+
+	for _, node := range closest {
+		if node.Addr == s.AdvertiseAddr {
+			continue
+		}
+
+		s.peersLock.Lock()
+		relayPeer, connected := s.peers[node.Addr]
+		s.peersLock.Unlock()
+
+		if connected {
+			fmt.Printf("[%s] No direct connection to %s, relaying through %s\n",
+				s.Transport.Addr(), targetAddr, node.Addr)
+			if err := s.sendToPeer(relayPeer, &relayMsg); err == nil {
+				return nil // successfully handed off to a relay
+			}
+		}
+	}
+
+	// Fallback: Try ANY connected peer
 	s.peersLock.Lock()
-	var relayPeers []p2p.Peer
+	var fallbackPeers []p2p.Peer
 	for _, p := range s.peers {
-		relayPeers = append(relayPeers, p)
+		fallbackPeers = append(fallbackPeers, p)
 	}
 	s.peersLock.Unlock()
 
-	for _, relay := range relayPeers {
-		fmt.Printf("[%s] No direct connection to %s, relaying through %s\n",
+	for _, relay := range fallbackPeers {
+		fmt.Printf("[%s] No direct connection to %s, relaying through fallback %s\n",
 			s.Transport.Addr(), targetAddr, relay.RemoteAddr().String())
 		if err := s.sendToPeer(relay, &relayMsg); err == nil {
 			return nil // successfully handed off to a relay
