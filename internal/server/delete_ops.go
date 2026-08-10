@@ -52,11 +52,19 @@ func (s *FileServer) DeleteFile(cid string) error {
 		})
 		// delete the bytes immediately from local CAS
 		// if this fails, the GC loop will clean them up later — tombstone is already set
-		if s.Store.Has(key) {
+		// if the bytes are already absent, or we delete them successfully,
+		// we MUST remove the key from the ledger so it doesn't stay around forever.
+		if !s.Store.Has(key) {
+			if err := s.ChunkLedger.Remove(key); err != nil {
+				fmt.Printf("[%s] Warning: failed to remove missing chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
+			}
+		} else {
 			if err := s.Store.DeleteStream(key); err != nil {
 				fmt.Printf("[%s] Warning: failed to delete local bytes for %s: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
 			} else {
-				s.ChunkLedger.Remove(key)
+				if err := s.ChunkLedger.Remove(key); err != nil {
+					fmt.Printf("[%s] Warning: failed to remove deleted chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(key, 16), err)
+				}
 			}
 		}
 	}
@@ -142,11 +150,17 @@ func (s *FileServer) handleDeleteFile(_ string, msg MessageDeleteFile) error {
 			continue // don't delete bytes without a persisted tombstone
 		}
 		// delete local bytes
-		if s.Store.Has(t.ChunkKey) {
+		if !s.Store.Has(t.ChunkKey) {
+			if err := s.ChunkLedger.Remove(t.ChunkKey); err != nil {
+				fmt.Printf("[%s] Warning: failed to remove missing chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+			}
+		} else {
 			if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
 				fmt.Printf("[%s] Warning: failed to delete bytes for %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 			} else {
-				s.ChunkLedger.Remove(t.ChunkKey)
+				if err := s.ChunkLedger.Remove(t.ChunkKey); err != nil {
+					fmt.Printf("[%s] Warning: failed to remove deleted chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+				}
 				fmt.Printf("[%s] Deleted chunk %s (tombstoned by peer)\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16))
 			}
 		}
@@ -189,13 +203,18 @@ func (s *FileServer) handleTombstoneSync(_ string, msg MessageTombstoneSync) err
 		}
 
 		if !s.Store.Has(t.ChunkKey) {
+			if err := s.ChunkLedger.Remove(t.ChunkKey); err != nil {
+				fmt.Printf("[%s] Warning: failed to remove missing synced chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+			}
 			continue
 		}
 		if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
 			fmt.Printf("[%s] Warning: failed to delete bytes for synced tombstone %s: %v\n",
 				s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 		} else {
-			s.ChunkLedger.Remove(t.ChunkKey)
+			if err := s.ChunkLedger.Remove(t.ChunkKey); err != nil {
+				fmt.Printf("[%s] Warning: failed to remove deleted synced chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+			}
 		}
 	}
 
@@ -235,12 +254,18 @@ func (s *FileServer) runGC() {
 
 	for _, t := range tombstones {
 		// make sure bytes are gone
-		if s.Store.Has(t.ChunkKey) {
+		if !s.Store.Has(t.ChunkKey) {
+			if err := s.ChunkLedger.Remove(t.ChunkKey); err != nil {
+				fmt.Printf("[%s] GC: failed to remove missing chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+			}
+		} else {
 			if err := s.Store.DeleteStream(t.ChunkKey); err != nil {
 				fmt.Printf("[%s] GC: failed to delete %s: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
 				continue
 			}
-			s.ChunkLedger.Remove(t.ChunkKey)
+			if err := s.ChunkLedger.Remove(t.ChunkKey); err != nil {
+				fmt.Printf("[%s] GC: failed to remove deleted chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(t.ChunkKey, 16), err)
+			}
 			cleaned++
 		}
 	}

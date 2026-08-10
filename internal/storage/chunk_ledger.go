@@ -20,40 +20,79 @@ type ChunkLedger struct {
 }
 
 // NewChunkLedger loads (or creates) the ledger at <rootDir>/chunk_ledger.json.
-func NewChunkLedger(rootDir string) *ChunkLedger {
+// It returns the ledger and a boolean indicating if it was missing or corrupted (needs rebuild).
+func NewChunkLedger(rootDir string) (*ChunkLedger, bool) {
 	cl := &ChunkLedger{
 		path: filepath.Join(rootDir, "chunk_ledger.json"),
 		keys: make(map[string]struct{}),
 	}
-	cl.load()
-	return cl
+	needsRebuild := cl.load()
+	return cl, needsRebuild
 }
 
 // Add registers a chunk key in the ledger. idempotent — adding a key
-// that already exists is a no-op (but still persists, just in case
-// a previous save was interrupted).
-func (cl *ChunkLedger) Add(key string) {
+// that already exists is a no-op. Returns an error if persistence fails,
+// rolling back the in-memory state so it doesn't get out of sync with disk.
+func (cl *ChunkLedger) Add(key string) error {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
+	if _, exists := cl.keys[key]; exists {
+		return nil
+	}
+
 	cl.keys[key] = struct{}{}
 	if err := cl.save(); err != nil {
-		fmt.Printf("[ChunkLedger] warning: failed to persist after Add(%s): %v\n", key[:min(16, len(key))], err)
+		delete(cl.keys, key) // rollback
+		return fmt.Errorf("failed to persist ledger after Add: %w", err)
 	}
+	return nil
+}
+
+// AddBatch adds multiple chunk keys under a single lock and single disk write.
+// Ideal for file uploads with many chunks.
+func (cl *ChunkLedger) AddBatch(keys []string) error {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	added := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, exists := cl.keys[k]; !exists {
+			cl.keys[k] = struct{}{}
+			added = append(added, k)
+		}
+	}
+
+	if len(added) == 0 {
+		return nil
+	}
+
+	if err := cl.save(); err != nil {
+		// rollback
+		for _, k := range added {
+			delete(cl.keys, k)
+		}
+		return fmt.Errorf("failed to persist ledger after AddBatch: %w", err)
+	}
+	return nil
 }
 
 // Remove deletes a chunk key from the ledger. no-op if the key isn't tracked.
-func (cl *ChunkLedger) Remove(key string) {
+// Rolls back if persistence fails.
+func (cl *ChunkLedger) Remove(key string) error {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 
 	if _, exists := cl.keys[key]; !exists {
-		return
+		return nil
 	}
+	
 	delete(cl.keys, key)
 	if err := cl.save(); err != nil {
-		fmt.Printf("[ChunkLedger] warning: failed to persist after Remove(%s): %v\n", key[:min(16, len(key))], err)
+		cl.keys[key] = struct{}{} // rollback
+		return fmt.Errorf("failed to persist ledger after Remove: %w", err)
 	}
+	return nil
 }
 
 // Has checks if a chunk key is tracked in the ledger.
@@ -83,25 +122,27 @@ func (cl *ChunkLedger) Count() int {
 	return len(cl.keys)
 }
 
-// load reads the ledger from disk. if the file doesn't exist, we start empty.
-// if it's corrupted, we log a warning and start empty — the ledger will
-// get repopulated as chunks arrive or are audited by the network.
-func (cl *ChunkLedger) load() {
+// load reads the ledger from disk.
+// Returns true if the file was missing or corrupted (so caller knows to rebuild it).
+func (cl *ChunkLedger) load() bool {
 	data, err := os.ReadFile(cl.path)
 	if err != nil {
-		return // file doesn't exist yet, start fresh
+		if os.IsNotExist(err) {
+			return true // missing, needs rebuild for existing nodes
+		}
+		fmt.Printf("[ChunkLedger] WARNING: failed to read %s: %v\n", cl.path, err)
+		return true // treat error as needing rebuild
 	}
 
 	var keys []string
 	if err := json.Unmarshal(data, &keys); err != nil {
-		// unlike CIDIndex which silently starts empty on corruption,
-		// at least yell about it so someone notices
-		fmt.Printf("[ChunkLedger] WARNING: %s is corrupted, starting empty: %v\n", cl.path, err)
-		return
+		fmt.Printf("[ChunkLedger] WARNING: %s is corrupted, needs rebuild: %v\n", cl.path, err)
+		return true
 	}
 	for _, k := range keys {
 		cl.keys[k] = struct{}{}
 	}
+	return false
 }
 
 // save writes the ledger to disk atomically: write to .tmp, then rename.

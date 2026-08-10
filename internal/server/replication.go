@@ -634,6 +634,9 @@ func (s *FileServer) handleOverReplication(chunkKey string, holders holderSet, o
 				fmt.Printf("[%s] Failed to drop our chunk %s: %v\n",
 					s.Transport.Addr(), truncateKey(chunkKey, 16), err)
 			} else {
+				if err := s.ChunkLedger.Remove(chunkKey); err != nil {
+					fmt.Printf("[%s] Warning: failed to remove dropped chunk %s from ledger: %v\n", s.Transport.Addr(), truncateKey(chunkKey, 16), err)
+				}
 				dropped++
 			}
 		} else {

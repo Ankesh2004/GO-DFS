@@ -81,6 +81,9 @@ func NewFileServer(options FileServerOptions) *FileServer {
 	store := storage.NewStore(options.RootDir)
 	id := dht.NewID(options.ID)
 
+	chunkLedger, needsRebuild := storage.NewChunkLedger(options.RootDir)
+	cidIndex := storage.NewCIDIndex(options.RootDir)
+
 	s := &FileServer{
 		FileServerOptions: options,
 		ID:                id,
@@ -92,8 +95,8 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		verifiedAddrs:     make(map[string]bool),
 		addrMap:           make(map[string]string),
 		relayPeers:        make(map[string]bool),
-		CIDIndex:          storage.NewCIDIndex(options.RootDir),
-		ChunkLedger:       storage.NewChunkLedger(options.RootDir),
+		CIDIndex:          cidIndex,
+		ChunkLedger:       chunkLedger,
 		peerProfiles:      make(map[string]StorageProfile),
 		peerHealth:        make(map[string]*PeerHealth),
 		HeartbeatInterval: DefaultHeartbeatInterval,
@@ -105,6 +108,32 @@ func NewFileServer(options FileServerOptions) *FileServer {
 	// wire up the RL placement optimizer if a sidecar URL was provided
 	s.Optimizer = NewPlacementOptimizer(options.RLSidecarURL)
 	s.Metrics = NewPlacementMetrics()
+
+	// Rebuild chunk ledger if it was missing or corrupted
+	if needsRebuild {
+		fmt.Printf("[Server %s] ChunkLedger missing or corrupt, rebuilding from CIDIndex...\n", s.AdvertiseAddr)
+		var keysToRecover []string
+		for _, entry := range cidIndex.List() {
+			manifestKey := entry.CID + ".manifest"
+			keysToRecover = append(keysToRecover, manifestKey)
+
+			if size, r, err := store.ReadStream(manifestKey); err == nil {
+				var manifest FileManifest
+				if err := gob.NewDecoder(r).Decode(&manifest); err == nil {
+					keysToRecover = append(keysToRecover, manifest.ChunkKeys...)
+				}
+				r.Close()
+				_ = size // ignore size
+			}
+		}
+		if len(keysToRecover) > 0 {
+			if err := chunkLedger.AddBatch(keysToRecover); err != nil {
+				fmt.Printf("[Server %s] Warning: failed to rebuild ChunkLedger: %v\n", s.AdvertiseAddr, err)
+			} else {
+				fmt.Printf("[Server %s] Rebuilt ChunkLedger with %d keys from CIDIndex\n", s.AdvertiseAddr, len(keysToRecover))
+			}
+		}
+	}
 
 	return s
 }
