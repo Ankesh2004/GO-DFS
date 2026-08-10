@@ -1153,15 +1153,33 @@ func (s *FileServer) bootstrapNetwork() {
 		if len(addr) == 0 {
 			continue
 		}
-		fmt.Printf("[%s] Dialing bootstrap node: %s\n", s.Transport.Addr(), addr)
+		
 		go func(addr string) {
-			if err := s.Transport.Dial(addr); err != nil {
-				fmt.Printf("[%s] Failed to dial bootstrap %s: %v\n", s.Transport.Addr(), addr, err)
+			backoff := 1 * time.Second
+			maxBackoff := 60 * time.Second
+
+			for {
+				fmt.Printf("[%s] Dialing bootstrap node: %s\n", s.Transport.Addr(), addr)
+				if err := s.Transport.Dial(addr); err != nil {
+					fmt.Printf("[%s] Failed to dial bootstrap %s: %v. Retrying in %v...\n", s.Transport.Addr(), addr, err, backoff)
+					
+					select {
+					case <-time.After(backoff):
+						backoff *= 2
+						if backoff > maxBackoff {
+							backoff = maxBackoff
+						}
+						continue
+					case <-s.quitChannel:
+						return
+					}
+				}
+				
+				// Once connected to bootstrap, run an initial discovery round to find other peers
+				time.Sleep(500 * time.Millisecond) // wait for PeerExchange to complete
+				s.runDiscoveryRound()
 				return
 			}
-			// Once connected to bootstrap, run an initial discovery round to find other peers
-			time.Sleep(500 * time.Millisecond) // wait for PeerExchange to complete
-			s.runDiscoveryRound()
 		}(addr)
 	}
 }
