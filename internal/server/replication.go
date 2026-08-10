@@ -546,7 +546,7 @@ func (s *FileServer) handleUnderReplication(chunkKey string, holders holderSet) 
 		s.Transport.Addr(), truncateKey(chunkKey, 16), len(holders), ReplicaTarget, needed)
 
 	targetID := dht.NewID(chunkKey)
-	candidates := s.DHT.NearestNodes(targetID, dht.K)
+	candidates := s.NetworkLookup(targetID)
 
 	// build candidate list excluding self, relays, and current holders
 	var nodeCandidates []NodeCandidate

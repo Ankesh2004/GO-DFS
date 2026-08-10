@@ -116,11 +116,13 @@ type MessagePeerExchange struct {
 // "Give me the K closest nodes you know to this TargetID."
 type MessageFindNode struct {
 	TargetID [32]byte
+	QueryID  string
 }
 
 // MessageFindNodeResponse is the reply to FindNode.
 type MessageFindNodeResponse struct {
 	ClosestPeers []PeerInfo
+	QueryID      string
 }
 
 // MessagePing is a heartbeat / liveness check

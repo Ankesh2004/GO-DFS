@@ -562,7 +562,7 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 
 	// step 4: replicate manifest + chunks to RL-optimized nodes (or DHT-nearest fallback)
 	targetID := dht.NewID(cid)
-	closest := s.DHT.NearestNodes(targetID, dht.K)
+	closest := s.NetworkLookup(targetID)
 
 	// fall back to all direct peers if DHT is empty
 	if len(closest) == 0 {
@@ -821,7 +821,7 @@ func (s *FileServer) fetchSingleChunk(chunkKey string) {
 
 	// ask DHT-nearest nodes first
 	targetID := dht.NewID(chunkKey)
-	closest := s.DHT.NearestNodes(targetID, dht.K)
+	closest := s.NetworkLookup(targetID)
 
 	for _, node := range closest {
 		if node.Addr == s.AdvertiseAddr || node.Addr == s.Transport.Addr() {

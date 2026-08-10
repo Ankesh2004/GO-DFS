@@ -58,6 +58,9 @@ type FileServer struct {
 
 	// thesis metrics -- tracks every placement decision and eviction
 	Metrics *PlacementMetrics
+	
+	pendingFindNodes   map[string]chan []PeerInfo
+	pendingFindNodesMu sync.Mutex
 
 	// replication health tracking
 	peerHealth       map[string]*PeerHealth // tracks heartbeat status per peer
@@ -103,6 +106,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		FailureThreshold:  DefaultFailureThreshold,
 		AuditInterval:     DefaultAuditInterval,
 		AuditTimeout:      DefaultAuditTimeout,
+		pendingFindNodes:  make(map[string]chan []PeerInfo),
 	}
 
 	// wire up the RL placement optimizer if a sidecar URL was provided
@@ -320,13 +324,44 @@ func (s *FileServer) handlePeerExchange(from string, msg MessagePeerExchange) er
 // -------- FIND_NODE (core Kademlia lookup) --------
 
 // sendFindNode asks a specific peer: "who do you know that's closest to targetID?"
-func (s *FileServer) sendFindNode(peer p2p.Peer, targetID dht.ID) error {
+// sendFindNode asks a specific peer: "who do you know that's closest to targetID?"
+// It waits for a response synchronously up to a timeout.
+func (s *FileServer) sendFindNode(addr string, targetID dht.ID) ([]PeerInfo, error) {
+	queryIDBytes := make([]byte, 8)
+	if _, err := rand.Read(queryIDBytes); err != nil {
+		return nil, err
+	}
+	queryID := fmt.Sprintf("%x", queryIDBytes)
+
+	respChan := make(chan []PeerInfo, 1)
+
+	s.pendingFindNodesMu.Lock()
+	s.pendingFindNodes[queryID] = respChan
+	s.pendingFindNodesMu.Unlock()
+
+	defer func() {
+		s.pendingFindNodesMu.Lock()
+		delete(s.pendingFindNodes, queryID)
+		s.pendingFindNodesMu.Unlock()
+	}()
+
 	msg := Message{
 		Payload: MessageFindNode{
 			TargetID: targetID,
+			QueryID:  queryID,
 		},
 	}
-	return s.sendToPeer(peer, &msg)
+	
+	if err := s.sendToAddr(addr, &msg); err != nil {
+		return nil, err
+	}
+
+	select {
+	case resp := <-respChan:
+		return resp, nil
+	case <-time.After(3 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for FindNode response from %s", addr)
+	}
 }
 
 func (s *FileServer) handleFindNode(from string, msg MessageFindNode) error {
@@ -338,24 +373,28 @@ func (s *FileServer) handleFindNode(from string, msg MessageFindNode) error {
 		response = append(response, PeerInfo{ID: n.ID, Addr: n.Addr})
 	}
 
-	// Send the response back to whoever asked
-	s.peersLock.Lock()
-	peer, ok := s.peers[from]
-	s.peersLock.Unlock()
-
-	if !ok {
-		return fmt.Errorf("peer %s not found for FindNode response", from)
-	}
-
 	respMsg := Message{
 		Payload: MessageFindNodeResponse{
 			ClosestPeers: response,
+			QueryID:      msg.QueryID,
 		},
 	}
-	return s.sendToPeer(peer, &respMsg)
+	return s.sendToAddr(from, &respMsg)
 }
 
 func (s *FileServer) handleFindNodeResponse(_ string, msg MessageFindNodeResponse) error {
+	// First, try to route the response to a waiting synchronous lookup
+	s.pendingFindNodesMu.Lock()
+	ch, exists := s.pendingFindNodes[msg.QueryID]
+	if exists {
+		// Only send if the channel isn't full to prevent blocking
+		select {
+		case ch <- msg.ClosestPeers:
+		default:
+		}
+	}
+	s.pendingFindNodesMu.Unlock()
+
 	// Add all discovered peers to our routing table
 	for _, pi := range msg.ClosestPeers {
 		piID := dht.ID(pi.ID)
@@ -601,9 +640,15 @@ func (s *FileServer) runDiscoveryRound() {
 
 	// Ask each peer for nodes closest to our own ID (standard Kademlia self-lookup)
 	for _, peer := range peerList {
-		if err := s.sendFindNode(peer, s.ID); err != nil {
-			fmt.Printf("[%s] Discovery FindNode failed: %v\n", s.Transport.Addr(), err)
-		}
+		go func(p p2p.Peer) {
+			s.peersLock.Lock()
+			addr, ok := s.addrMap[p.RemoteAddr().String()]
+			if !ok {
+				addr = p.RemoteAddr().String()
+			}
+			s.peersLock.Unlock()
+			_, _ = s.sendFindNode(addr, s.ID)
+		}(peer)
 	}
 }
 
@@ -720,7 +765,7 @@ func (s *FileServer) broadcast(msg *Message) error {
 	// For store messages, route specifically to the K closest nodes
 	if storeMsg, ok := msg.Payload.(MessageStoreFile); ok {
 		targetID := dht.NewID(storeMsg.Key)
-		closest := s.DHT.NearestNodes(targetID, dht.K)
+		closest := s.NetworkLookup(targetID)
 
 		fmt.Printf("[%s] Broadcasting store metadata for %s. DHT has %d potential targets.\n",
 			s.Transport.Addr(), storeMsg.Key, len(closest))
@@ -798,7 +843,7 @@ func (s *FileServer) GetFile(key string) (io.Reader, error) {
 
 	// Also check DHT for nodes we know about but aren't directly connected to
 	targetID := dht.NewID(key)
-	closest := s.DHT.NearestNodes(targetID, dht.K)
+	closest := s.NetworkLookup(targetID)
 	for _, node := range closest {
 		found := false
 		for _, addr := range peerAddrs {
@@ -947,7 +992,7 @@ func (s *FileServer) StoreData(key string, userEncryptionKey []byte, r io.Reader
 	// Stage 2: Disseminate the actual data block
 	// We only send to nodes the DHT thinks are "closest" to the file key
 	targetID := dht.NewID(key)
-	closest := s.DHT.NearestNodes(targetID, dht.K)
+	closest := s.NetworkLookup(targetID)
 
 	// If DHT is empty, we must fallback to our direct neighbors
 	if len(closest) == 0 {

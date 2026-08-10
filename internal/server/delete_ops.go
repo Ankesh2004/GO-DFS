@@ -95,7 +95,7 @@ func (s *FileServer) broadcastDeleteToNetwork(cid string, msg *Message) {
 
 	// DHT-nearest nodes (most likely to have a replica)
 	targetID := dht.NewID(cid)
-	closest := s.DHT.NearestNodes(targetID, dht.K)
+	closest := s.NetworkLookup(targetID)
 	for _, node := range closest {
 		if node.Addr == s.AdvertiseAddr || node.Addr == s.Transport.Addr() {
 			continue
