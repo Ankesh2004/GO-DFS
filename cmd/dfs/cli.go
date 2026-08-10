@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -25,12 +24,6 @@ func RetrieveAndDecrypt(s *server.FileServer, cid string, saveName string, userK
 		defer closer.Close()
 	}
 
-	// decrypt as a stream — no need to load the whole thing into memory
-	decryptedBuf := new(bytes.Buffer)
-	if err := server.DecryptStream(userKey, r, decryptedBuf); err != nil {
-		return fmt.Errorf("decryption failed: %w", err)
-	}
-
 	// use the provided name, or fall back to the CID
 	if saveName == "" {
 		saveName = cid
@@ -41,12 +34,33 @@ func RetrieveAndDecrypt(s *server.FileServer, cid string, saveName string, userK
 		return err
 	}
 	destPath := filepath.Join(destDir, saveName)
-	if err := os.WriteFile(destPath, decryptedBuf.Bytes(), 0644); err != nil {
-		return err
+
+	// Open destination file
+	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer f.Close()
+
+	// decrypt as a stream directly to disk — avoids OOM on large files
+	var bytesWritten int64
+	// DecryptStream acts as an io.Writer for the decrypted output,
+	// but wait, let's check what DecryptStream signature is.
+	// Oh, DecryptStream(key, reader, writer) - so we can just pass `f`.
+	if err := server.DecryptStream(userKey, r, f); err != nil {
+		// Clean up the partial file if decryption fails
+		f.Close()
+		os.Remove(destPath)
+		return fmt.Errorf("decryption failed: %w", err)
+	}
+
+	// Get file size for reporting
+	if stat, err := f.Stat(); err == nil {
+		bytesWritten = stat.Size()
 	}
 
 	fmt.Printf("✓ File retrieved, decrypted, and saved to: %s\n", destPath)
-	fmt.Printf("✓ Size: %d bytes\n", decryptedBuf.Len())
+	fmt.Printf("✓ Size: %d bytes\n", bytesWritten)
 	return nil
 }
 
