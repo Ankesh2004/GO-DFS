@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
 	"github.com/Ankesh2004/GO-DFS/pkg/dht"
@@ -23,6 +25,8 @@ type FileServerOptions struct {
 	Transport      p2p.Transport
 	BootstrapNodes []string
 	RelayOnly      bool // if true, this node will act ONLY as a relay and won't store data
+	RelayToken     string // token required for peers to use this node as a relay
+	RelayBWLimit   int    // bytes per second allowed per peer (0 = unlimited)
 
 	// RL placement config -- per-node hardware profile and sidecar URL
 	StorageProfile StorageProfile // this node's hardware fingerprint (tier, latency, cost, etc.)
@@ -43,6 +47,7 @@ type FileServer struct {
 	verifiedAddrs map[string]bool   // addresses that completed PeerExchange (safe to share/dial)
 	addrMap       map[string]string // raw TCP remote addr --> advertised listen addr
 	relayPeers    map[string]bool   // map of advertised addrs that are RelayOnly=true
+	relayLimiters map[string]*rate.Limiter // rate limiters per peer for relay traffic
 	pendingChunks sync.Map          // chunkKey --> chan struct{}, signals when a requested chunk arrives
 	CIDIndex      *storage.CIDIndex    // local index mapping CID --> original filename
 	ChunkLedger   *storage.ChunkLedger // tracks ALL chunk keys on disk (uploaded + replicas)
@@ -98,6 +103,7 @@ func NewFileServer(options FileServerOptions) *FileServer {
 		verifiedAddrs:     make(map[string]bool),
 		addrMap:           make(map[string]string),
 		relayPeers:        make(map[string]bool),
+		relayLimiters:     make(map[string]*rate.Limiter),
 		CIDIndex:          cidIndex,
 		ChunkLedger:       chunkLedger,
 		peerProfiles:      make(map[string]StorageProfile),
@@ -430,7 +436,26 @@ func (s *FileServer) handleRelay(from string, msg MessageRelay) error {
 		return s.handleMessage(msg.OriginAddr, &innerMsg)
 	}
 
-	// We're not the target — forward it to the actual destination
+	// We're not the target - forward it to the actual destination
+	if s.RelayToken != "" && msg.RelayToken != s.RelayToken {
+		return fmt.Errorf("relay token invalid or missing from %s", from)
+	}
+
+	if s.RelayBWLimit > 0 {
+		s.peersLock.Lock()
+		limiter, ok := s.relayLimiters[from]
+		if !ok {
+			limiter = rate.NewLimiter(rate.Limit(s.RelayBWLimit), s.RelayBWLimit*2)
+			s.relayLimiters[from] = limiter
+		}
+		s.peersLock.Unlock()
+
+		payloadSize := len(msg.InnerPayload)
+		if !limiter.AllowN(time.Now(), payloadSize) {
+			return fmt.Errorf("rate limit exceeded for relay from %s", from)
+		}
+	}
+
 	s.peersLock.Lock()
 	targetPeer, directlyConnected := s.peers[msg.TargetAddr]
 	s.peersLock.Unlock()
@@ -511,6 +536,7 @@ func (s *FileServer) sendToAddr(targetAddr string, msg *Message) error {
 			OriginAddr:   s.AdvertiseAddr,
 			InnerPayload: buf.Bytes(),
 			TTL:          3, // max 3 hops to prevent infinite loops
+			RelayToken:   s.RelayToken,
 		},
 	}
 

@@ -24,6 +24,8 @@ var (
 	nodeDataDir     string
 	nodeID          string
 	nodeRelay       bool
+	relayToken      string
+	relayBWLimit    int
 	nodeAPIPort     string
 	nodeInteractive bool
 
@@ -64,6 +66,8 @@ func init() {
 	nodeStartCmd.Flags().StringVar(&nodeDataDir, "data", "", "root directory for CAS storage (default: ./cas_<port>)")
 	nodeStartCmd.Flags().StringVar(&nodeID, "id", "", "override node identity string")
 	nodeStartCmd.Flags().BoolVar(&nodeRelay, "relay", false, "relay-only mode (no local storage)")
+	nodeStartCmd.Flags().StringVar(&relayToken, "relay-token", "", "authentication token required for peers to use this relay")
+	nodeStartCmd.Flags().IntVar(&relayBWLimit, "relay-bw-limit", 0, "bandwidth limit in bytes per second for relayed traffic (0 = unlimited)")
 	nodeStartCmd.Flags().StringVar(&nodeAPIPort, "api-port", ":9000", "HTTP control API port (localhost only)")
 	nodeStartCmd.Flags().BoolVarP(&nodeInteractive, "interactive", "i", false, "start the interactive REPL alongside the node")
 
@@ -151,6 +155,8 @@ func runNodeDaemon() {
 		Transport:      transport,
 		BootstrapNodes: bootstrapNodes,
 		RelayOnly:      nodeRelay,
+		RelayToken:     relayToken,
+		RelayBWLimit:   relayBWLimit,
 		StorageProfile: server.StorageProfile{
 			Tier:          tier,
 			LatencyMs:     nodeLatency,
@@ -170,6 +176,10 @@ func runNodeDaemon() {
 	fmt.Printf("Advertise  : %s\n", advertise)
 	fmt.Printf("Data Dir   : %s\n", dataDir)
 	fmt.Printf("Relay Mode : %v\n", nodeRelay)
+	if nodeRelay {
+		fmt.Printf("Relay Token: %s\n", relayToken)
+		fmt.Printf("Relay Limit: %d B/s\n", relayBWLimit)
+	}
 	fmt.Printf("API Port   : %s\n", nodeAPIPort)
 	fmt.Printf("Tier       : %s (latency=%.1fms, cost=$%.4f/GB/hr)\n", nodeStorageTier, nodeLatency, nodeCost)
 	fmt.Printf("RL Enabled : %v\n", nodeRLEnabled)

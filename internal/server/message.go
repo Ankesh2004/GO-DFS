@@ -139,6 +139,7 @@ type MessageRelay struct {
 	OriginAddr   string // who originally sent this (so the destination can respond)
 	InnerPayload []byte // gob-encoded Message to forward
 	TTL          int    // prevent infinite relay loops
+	RelayToken   string // authentication token to prevent unauthorized relay abuse
 }
 
 // MessageRelayData carries actual file data INSIDE a message (not as a raw stream).

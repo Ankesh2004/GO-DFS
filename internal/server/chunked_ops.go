@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
 	"github.com/Ankesh2004/GO-DFS/pkg/dht"
@@ -98,6 +100,27 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 	}
 
 	// We're NOT the target — pipe it through to whoever is
+	if s.RelayToken != "" && meta.RelayToken != s.RelayToken {
+		_, _ = io.CopyN(io.Discard, sourcePeer, meta.TotalSize)
+		sourcePeer.CloseStream()
+		return fmt.Errorf("relay token invalid or missing from %s", from)
+	}
+
+	if s.RelayBWLimit > 0 {
+		s.peersLock.Lock()
+		limiter, ok := s.relayLimiters[from]
+		if !ok {
+			limiter = rate.NewLimiter(rate.Limit(s.RelayBWLimit), s.RelayBWLimit*2)
+			s.relayLimiters[from] = limiter
+		}
+		s.peersLock.Unlock()
+
+		if !limiter.AllowN(time.Now(), int(meta.TotalSize)) {
+			_, _ = io.CopyN(io.Discard, sourcePeer, meta.TotalSize)
+			sourcePeer.CloseStream()
+			return fmt.Errorf("rate limit exceeded for stream relay from %s", from)
+		}
+	}
 	s.peersLock.Lock()
 	targetPeer, targetOk := s.peers[meta.TargetAddr]
 	s.peersLock.Unlock()
@@ -154,6 +177,7 @@ func (s *FileServer) sendRelayStream(relayPeer p2p.Peer, targetAddr string, key 
 		OriginAddr: s.AdvertiseAddr,
 		Key:        key,
 		TotalSize:  size,
+		RelayToken: s.RelayToken,
 	}
 
 	// write the type marker — exactly once. writeRelayStreamHeader does NOT

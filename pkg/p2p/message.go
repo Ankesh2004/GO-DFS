@@ -11,6 +11,7 @@ type RelayStreamMeta struct {
 	OriginAddr string // who started the transfer
 	Key        string // file/chunk identifier so the receiver knows what it's getting
 	TotalSize  int64  // how many bytes will follow after the header
+	RelayToken string // authentication token for public relaying
 }
 
 // Holds data of any msg sent between any 2 clients
