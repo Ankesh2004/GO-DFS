@@ -225,10 +225,14 @@ func (s *FileServer) handleTombstoneSync(_ string, msg MessageTombstoneSync) err
 
 // -------- GC Loop --------
 
+// TombstoneTTL dictates how long a tombstone is kept before being pruned.
+// 30 days is generally long enough for offline peers to reconnect and sync deletions.
+const TombstoneTTL = 30 * 24 * time.Hour
+
 // gcLoop runs every 10 minutes.
 // For each tombstone:
 //   - deletes the chunk bytes from CAS (in case any slipped through or disk write failed earlier)
-//     (The tombstone record itself stays indefinitely as a delete journal for offline peers)
+//   - purges tombstones older than TombstoneTTL to prevent infinite disk growth.
 func (s *FileServer) gcLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
@@ -244,6 +248,12 @@ func (s *FileServer) gcLoop() {
 }
 
 func (s *FileServer) runGC() {
+	// 1. Prune old tombstones
+	if err := s.Tombstones.Prune(time.Now().Add(-TombstoneTTL)); err != nil {
+		fmt.Printf("[%s] GC: failed to prune tombstones: %v\n", s.Transport.Addr(), err)
+	}
+
+	// 2. Process remaining active tombstones
 	tombstones := s.Tombstones.All()
 	if len(tombstones) == 0 {
 		return

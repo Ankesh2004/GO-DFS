@@ -87,6 +87,26 @@ func (ts *TombstoneStore) ApplyBatch(tombstones []Tombstone) error {
 	return ts.save()
 }
 
+// Prune deletes all tombstones that are older than the specified time.
+// This prevents the tombstone file from growing infinitely.
+func (ts *TombstoneStore) Prune(olderThan time.Time) error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	changed := false
+	for k, t := range ts.entries {
+		if t.DeletedAt.Before(olderThan) {
+			delete(ts.entries, k)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+	return ts.save()
+}
+
 // -------- Persistence --------
 
 func (ts *TombstoneStore) load() {
