@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -81,7 +82,12 @@ func (idx *CIDIndex) load() {
 
 	var entries []CIDEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return // corrupted file, start fresh (we'll overwrite on next Add)
+		// corrupted file: don't just start fresh and overwrite it.
+		// back it up so the user can manually recover if possible.
+		backupPath := idx.path + ".corrupt"
+		os.Rename(idx.path, backupPath)
+		fmt.Printf("[CIDIndex] WARNING: %s is corrupted! Backed up to %s. Starting fresh.\n", idx.path, backupPath)
+		return
 	}
 	for _, e := range entries {
 		idx.entries[e.CID] = e
@@ -99,5 +105,16 @@ func (idx *CIDIndex) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(idx.path, data, 0644)
+	
+	// ensure the directory exists before saving
+	if err := os.MkdirAll(filepath.Dir(idx.path), 0755); err != nil {
+		return err
+	}
+
+	// atomic write: write to .tmp, then rename
+	tmpPath := idx.path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, idx.path)
 }
