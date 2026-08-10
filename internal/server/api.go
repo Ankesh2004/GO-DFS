@@ -105,9 +105,11 @@ func (s *FileServer) StartAPI(addr string, keyPath string) (*APIServer, error) {
 
 	api.httpServer = &http.Server{
 		Addr:         listenAddr,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second, // file transfers can be slow
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		// ReadTimeout and WriteTimeout are intentionally left disabled (0).
+		// Since this API binds locally (127.0.0.1) and streams large files,
+		// strict timeouts here would silently kill multi-gigabyte uploads/downloads.
 	}
 
 	listener, err := net.Listen("tcp", listenAddr)
