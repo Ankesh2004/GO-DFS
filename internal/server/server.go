@@ -1088,6 +1088,9 @@ func (s *FileServer) Start() error {
 	if err := s.Transport.ListenAndAccept(); err != nil {
 		return err
 	}
+	// Load peers from disk before bootstrapping
+	s.loadPeers()
+
 	if len(s.BootstrapNodes) > 0 {
 		s.bootstrapNetwork()
 	}
@@ -1097,6 +1100,7 @@ func (s *FileServer) Start() error {
 	go s.gcLoop()          // GC for expired tombstones
 	go s.heartbeatLoop()   // pings peers to detect failures
 	go s.replicationLoop() // checks chunk health and re-replicates if needed
+	go s.persistLoop()     // periodically save routing table to disk
 
 	s.loop()
 	return nil
@@ -1108,6 +1112,7 @@ func (s *FileServer) Stop() error {
 		return nil
 	default:
 		close(s.quitChannel)
+		s.savePeers() // save peers on clean shutdown
 	}
 	return nil
 }
