@@ -282,6 +282,35 @@ Open [http://localhost:3000](http://localhost:3000) in your browser to interact 
 
 ---
 
+## Future Work
+
+While GO-DFS is a robust P2P distributed file system, there are several advanced production features planned for future iterations:
+
+### Networking & Routing
+- **Iterative Kademlia Lookup**: Implementing $\alpha=3$ concurrent `FIND_NODE` multi-hop convergence to target keys.
+- **Connection Multiplexing**: Moving to Yamux or QUIC streams over a single socket to avoid head-of-line blocking.
+- **Peer Persistence**: Saving the routing table to `peers.json` across restarts so nodes don't forget the entire mesh.
+- **Bootstrap Retry with Backoff**: Exponential backoff loop for bootstrap dialing to improve resilience against temporary downtime.
+- **Relay Rate Limiting**: Bandwidth caps and authentication tokens on public relay nodes.
+
+### Security Hardening
+- **Signed Identity Handshake**: Adding Ed25519 static keypairs per node to sign X25519 DH ephemeral keys, eliminating the risk of MITM attacks.
+- **KDF for Subkeys**: Deriving separate subkeys for metadata vs. payload encryption (e.g., using HKDF or Argon2id).
+- **Envelope Encryption**: Securing the master key via KMS (Vault / AWS KMS) so raw keys never touch the disk.
+
+### Storage & Data Integrity
+- **Erasure Coding (Reed-Solomon)**: Splitting chunks into 8 data + 4 parity pieces to reduce storage overhead from 300% (3x replication) to 150%.
+- **Bit-Rot Scrubbing**: Background SHA-256 verification to detect and repair corrupted on-disk chunks over time.
+- **Storage Quotas & Eviction**: Enforcing disk capacity bounds using LRU chunk eviction.
+- **Content-Defined Chunking (FastCDC)**: Variable-size chunks to handle file edits without triggering full re-chunking of the entire file.
+- **Chunk Compression (Zstd/Snappy)**: Compressing data before encryption to reduce storage and bandwidth footprint.
+- **Resumable Transfers**: Allowing partial chunk transfer resumption on failure.
+
+### Web Dashboard
+- **API Integration**: Wiring the Next.js frontend directly to the local HTTP API to enable a fully functional file browser, peer topology map, and node health monitor via the browser.
+
+---
+
 ## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
