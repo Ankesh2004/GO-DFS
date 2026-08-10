@@ -116,6 +116,152 @@ class KademliaBaseline:
         return random.sample(range(len(candidates)), needed)
 
 
+class DRPSBaseline:
+    """
+    Adapted DRPS Heuristic Baseline (ADHB).
+
+    Faithful implementation of the rank-based + greedy load-balancing
+    heuristic from the DRPS paper (centralized original, decentralized here).
+
+    Two-stage algorithm:
+      Stage 1 — rank every candidate by a weighted score:
+                   Score_i = w1*C_i + w2*Q_i + w3*D_i + w4*B_i
+        where:
+          C_i = available_mb / max_available_mb          (capacity, higher = better)
+          Q_i = uptime_ratio                             (reliability, higher = better)
+          D_i = 1 - latency_ms / max_latency_ms         (delay, lower latency = higher score)
+          B_i = 1 - load_i  (where load = 1 - available_mb/100000) (busyness, lower load = higher)
+
+        Weights per paper: w1=0.20, w2=0.35, w3=0.25, w4=0.20
+        (reliability is the highest — same philosophy as our DRL reward weights)
+
+      Stage 2 — greedy selection: pick top-scored nodes obeying T_load=0.85,
+                then do one load-variance swap pass to balance the chosen set.
+
+    This is the paper we are improving upon — fixed weights vs. learned policy.
+    """
+
+    # paper-specified weights (must sum to 1.0)
+    W_CAPACITY    = 0.20
+    W_RELIABILITY = 0.35   # highest, same reasoning as our DRL w3
+    W_DELAY       = 0.25
+    W_LOAD        = 0.20
+
+    T_LOAD = 0.85  # max acceptable load ratio before a node is skipped
+
+    def select_targets(self, candidates, needed, chunk_size_mb=0.1):
+        """
+        Stage 1: compute normalized scores for all feasible candidates.
+        Stage 2: greedy pick + load-variance balancing swap.
+
+        returns list of selected indices into `candidates`.
+        """
+        if len(candidates) <= needed:
+            return list(range(len(candidates)))
+
+        # --- capacity constraint: filter nodes with enough storage ---
+        feasible = [
+            i for i, c in enumerate(candidates)
+            if c.get("available_mb", 0) >= chunk_size_mb
+        ]
+        if len(feasible) < needed:
+            # relax constraint and use all if not enough feasible
+            feasible = list(range(len(candidates)))
+
+        # --- normalisation denominators (avoid div-by-zero) ---
+        avail_vals  = [candidates[i].get("available_mb",  1.0) for i in feasible]
+        latency_vals = [candidates[i].get("latency_ms",   1.0) for i in feasible]
+
+        S_max = max(avail_vals)   if max(avail_vals)   > 0 else 1.0
+        L_max = max(latency_vals) if max(latency_vals) > 0 else 1.0
+
+        # --- Stage 1: score every feasible candidate ---
+        scored = []
+        for i in feasible:
+            c = candidates[i]
+
+            C_i = c.get("available_mb", 1.0) / S_max
+
+            Q_i = c.get("uptime_ratio", 0.5)   # already in [0, 1]
+
+            D_i = 1.0 - (c.get("latency_ms", 5.0) / L_max)
+
+            # estimate load from available capacity (inverse of fullness)
+            # lower available_mb relative to max => higher load
+            load_i = 1.0 - (c.get("available_mb", 1.0) / S_max)
+            B_i = 1.0 - load_i  # higher available => lower load => better score
+
+            score = (
+                self.W_CAPACITY    * C_i
+                + self.W_RELIABILITY * Q_i
+                + self.W_DELAY       * D_i
+                + self.W_LOAD        * B_i
+            )
+            scored.append((score, load_i, i))
+
+        # sort descending by score
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # --- Stage 2: greedy pick obeying load threshold ---
+        selected = []
+        skipped  = []
+        for score, load_i, idx in scored:
+            if len(selected) == needed:
+                break
+            if load_i < self.T_LOAD:
+                selected.append(idx)
+            else:
+                skipped.append((score, load_i, idx))  # overloaded — try later
+
+        # if we couldn't fill with sub-threshold nodes, fall back to skipped ones
+        for score, load_i, idx in skipped:
+            if len(selected) == needed:
+                break
+            selected.append(idx)
+
+        # --- Stage 2b: greedy load-variance swap ---
+        # compute load vector for the current selection
+        loads = [1.0 - (candidates[i].get("available_mb", 1.0) / S_max) for i in selected]
+        avg_load = np.mean(loads)
+
+        def variance(load_list):
+            m = np.mean(load_list)
+            return np.mean([(l - m) ** 2 for l in load_list])
+
+        old_var = variance(loads)
+
+        # try swapping the most overloaded selected node with the lowest-loaded unselected one
+        selected_set = set(selected)
+        unselected = [i for i in feasible if i not in selected_set]
+
+        if unselected:
+            # find the most overloaded node in the selection
+            overloaded_pos = max(range(len(selected)), key=lambda j: loads[j])
+            overloaded_idx = selected[overloaded_pos]
+
+            # find the lightest unselected node that is under the avg load
+            candidates_for_swap = [
+                i for i in unselected
+                if (1.0 - candidates[i].get("available_mb", 1.0) / S_max) < avg_load
+            ]
+
+            if candidates_for_swap:
+                # pick the one with the lowest load
+                best_swap = min(
+                    candidates_for_swap,
+                    key=lambda i: 1.0 - candidates[i].get("available_mb", 1.0) / S_max
+                )
+                # check if swap reduces variance
+                new_loads = loads[:]
+                new_load_val = 1.0 - candidates[best_swap].get("available_mb", 1.0) / S_max
+                new_loads[overloaded_pos] = new_load_val
+
+                if variance(new_loads) < old_var:
+                    selected[overloaded_pos] = best_swap
+
+        return selected
+
+
 def create_network(num_nodes):
     """spin up a heterogeneous network with realistic tier distribution."""
     nodes = []
@@ -178,8 +324,9 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
     print(f"{'='*60}\n")
 
     nodes = create_network(num_nodes)
-    agent = DDPGAgent(max_candidates=min(num_nodes, config.MAX_CANDIDATES))
+    agent    = DDPGAgent(max_candidates=min(num_nodes, config.MAX_CANDIDATES))
     baseline = KademliaBaseline()
+    drps     = DRPSBaseline()
 
     # tracking arrays for graphs
     rl_latencies = []
@@ -193,6 +340,12 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
     kad_costs = []
     kad_uptimes = []
     kad_tiers = []
+
+    # DRPS tracking — same structure as RL and Kademlia
+    drps_latencies = []
+    drps_costs     = []
+    drps_uptimes   = []
+    drps_tiers     = []
 
     eviction_events = []
     churn_timeline = []
@@ -268,13 +421,26 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
         kad_uptimes.append(kad_uptime)
         kad_tiers.extend(kad_tier_list)
 
+        # --- DRPS Heuristic Baseline Decision ---
+        drps_indices = drps.select_targets(candidates, needed_replicas)
+        drps_actual_lat = compute_actual_latency(candidates, drps_indices)
+        drps_cost   = sum(candidates[i]["cost_per_gb_hour"] for i in drps_indices)
+        drps_uptime = np.mean([candidates[i]["uptime_ratio"] for i in drps_indices])
+        drps_tier_list = [candidates[i]["tier"] for i in drps_indices]
+
+        drps_latencies.append(drps_actual_lat)
+        drps_costs.append(drps_cost)
+        drps_uptimes.append(drps_uptime)
+        drps_tiers.extend(drps_tier_list)
+
         # progress print every 500 episodes
         if (ep + 1) % 500 == 0:
             elapsed = time.time() - start_time
-            rl_avg = np.mean(rl_latencies[-500:])
-            kad_avg = np.mean(kad_latencies[-500:])
+            rl_avg   = np.mean(rl_latencies[-500:])
+            kad_avg  = np.mean(kad_latencies[-500:])
+            drps_avg = np.mean(drps_latencies[-500:])
             print(f"  Episode {ep+1:5d}/{num_episodes} | "
-                  f"RL lat: {rl_avg:.2f}ms | Kad lat: {kad_avg:.2f}ms | "
+                  f"RL: {rl_avg:.2f}ms | Kad: {kad_avg:.2f}ms | DRPS: {drps_avg:.2f}ms | "
                   f"Buffer: {len(agent.replay_buffer)} | "
                   f"Alive: {alive_count}/{num_nodes} | "
                   f"Time: {elapsed:.1f}s")
@@ -306,6 +472,16 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
                 "total_evictions": 0,
             }
         },
+        "drps": {
+            "placements": [],
+            "evictions": [],
+            "summary": {
+                "total_placements": len(drps_latencies),
+                "rl_placements": 0,
+                "fallback_placements": 0,
+                "total_evictions": 0,
+            }
+        },
         "churn_timeline": churn_timeline,
         "agent_stats": agent.get_stats(),
     }
@@ -331,6 +507,16 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
             "selected_tiers": [],
         })
 
+    for i in range(len(drps_latencies)):
+        results["drps"]["placements"].append({
+            "method": "drps",
+            "avg_latency_ms": round(drps_latencies[i], 2),
+            "total_cost": round(drps_costs[i], 6),
+            "avg_uptime": round(drps_uptimes[i], 4),
+            "duration_ms": 0,  # pure Python heuristic, negligible overhead
+            "selected_tiers": [],
+        })
+
     # add tier distribution in aggregate
     tier_names = {0: "nvme", 1: "ssd", 2: "hdd"}
     for tier_val in [0, 1, 2]:
@@ -338,6 +524,8 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
         results["rl"]["tier_counts"][tier_names[tier_val]] = rl_tiers.count(tier_val)
         results["kademlia"]["tier_counts"] = results.get("kademlia", {}).get("tier_counts", {})
         results["kademlia"]["tier_counts"][tier_names[tier_val]] = kad_tiers.count(tier_val)
+        results["drps"]["tier_counts"] = results.get("drps", {}).get("tier_counts", {})
+        results["drps"]["tier_counts"][tier_names[tier_val]] = drps_tiers.count(tier_val)
 
     # save results
     output_dir = os.path.join(os.path.dirname(__file__), "results")
@@ -348,48 +536,67 @@ def run_simulation(num_nodes, num_episodes, needed_replicas=3):
         json.dump(results["rl"], f, indent=2)
     with open(os.path.join(output_dir, "kademlia_metrics.json"), "w") as f:
         json.dump(results["kademlia"], f, indent=2)
+    with open(os.path.join(output_dir, "drps_metrics.json"), "w") as f:
+        json.dump(results["drps"], f, indent=2)
 
     # also save the full results with churn data for extra analysis
     with open(os.path.join(output_dir, "simulation_full.json"), "w") as f:
         json.dump(results, f, indent=2)
 
-    # print the final comparison table
-    print(f"\n{'='*60}")
-    print(f"  RESULTS SUMMARY")
-    print(f"{'='*60}")
-    print(f"  {'Metric':<30} {'DRL Agent':>12} {'Kademlia':>12} {'Diff':>8}")
-    print(f"  {'-'*62}")
+    # print the final 3-way comparison table
+    print(f"\n{'='*75}")
+    print(f"  RESULTS SUMMARY  (DRL Agent vs DRPS Heuristic vs Kademlia DHT)")
+    print(f"{'='*75}")
+    print(f"  {'Metric':<30} {'DRL Agent':>12} {'DRPS':>12} {'Kademlia':>12}")
+    print(f"  {'-'*70}")
 
-    rl_avg_lat = np.mean(rl_latencies)
-    kad_avg_lat = np.mean(kad_latencies)
-    print(f"  {'Avg Latency (ms)':<30} {rl_avg_lat:>12.2f} {kad_avg_lat:>12.2f} {((rl_avg_lat-kad_avg_lat)/kad_avg_lat*100):>7.1f}%")
+    rl_avg_lat   = np.mean(rl_latencies)
+    drps_avg_lat = np.mean(drps_latencies)
+    kad_avg_lat  = np.mean(kad_latencies)
+    print(f"  {'Avg Latency (ms)':<30} {rl_avg_lat:>12.2f} {drps_avg_lat:>12.2f} {kad_avg_lat:>12.2f}")
 
-    rl_total_cost = sum(rl_costs)
-    kad_total_cost = sum(kad_costs)
-    print(f"  {'Total Cost ($)':<30} {rl_total_cost:>12.4f} {kad_total_cost:>12.4f} {((rl_total_cost-kad_total_cost)/kad_total_cost*100):>7.1f}%")
+    rl_total_cost   = sum(rl_costs)
+    drps_total_cost = sum(drps_costs)
+    kad_total_cost  = sum(kad_costs)
+    print(f"  {'Total Cost ($)':<30} {rl_total_cost:>12.4f} {drps_total_cost:>12.4f} {kad_total_cost:>12.4f}")
 
-    rl_avg_up = np.mean(rl_uptimes)
-    kad_avg_up = np.mean(kad_uptimes)
-    print(f"  {'Avg Node Uptime':<30} {rl_avg_up:>12.4f} {kad_avg_up:>12.4f} {((rl_avg_up-kad_avg_up)/kad_avg_up*100):>7.1f}%")
+    rl_avg_up   = np.mean(rl_uptimes)
+    drps_avg_up = np.mean(drps_uptimes)
+    kad_avg_up  = np.mean(kad_uptimes)
+    print(f"  {'Avg Node Uptime':<30} {rl_avg_up:>12.4f} {drps_avg_up:>12.4f} {kad_avg_up:>12.4f}")
 
     rl_avg_dur = np.mean(rl_durations)
-    print(f"  {'Avg Decision Time (ms)':<30} {rl_avg_dur:>12.2f} {'~0':>12}")
-
+    print(f"  {'Avg Decision Time (ms)':<30} {rl_avg_dur:>12.2f} {'~0':>12} {'~0':>12}")
     print(f"  {'Eviction Events':<30} {len(eviction_events):>12}")
     print(f"  {'Model Updates':<30} {agent.model_version:>12}")
 
-    # also print the last 500 episodes comparison (post-training)
+    # DRL improvement over DRPS and Kademlia (last 500 = post-warmup trained agent)
     if len(rl_latencies) > 500:
-        print(f"\n  --- Last 500 Episodes (Trained Agent) ---")
-        rl_late = np.mean(rl_latencies[-500:])
-        kad_late = np.mean(kad_latencies[-500:])
-        print(f"  {'Avg Latency (ms)':<30} {rl_late:>12.2f} {kad_late:>12.2f} {((rl_late-kad_late)/kad_late*100):>7.1f}%")
-        rl_cost_late = np.mean(rl_costs[-500:])
-        kad_cost_late = np.mean(kad_costs[-500:])
-        print(f"  {'Avg Cost per Placement':<30} {rl_cost_late:>12.6f} {kad_cost_late:>12.6f} {((rl_cost_late-kad_cost_late)/kad_cost_late*100):>7.1f}%")
-        rl_up_late = np.mean(rl_uptimes[-500:])
-        kad_up_late = np.mean(kad_uptimes[-500:])
-        print(f"  {'Avg Node Uptime':<30} {rl_up_late:>12.4f} {kad_up_late:>12.4f} {((rl_up_late-kad_up_late)/kad_up_late*100):>7.1f}%")
+        print(f"\n  --- Last 500 Episodes (Trained Agent, Post-Warmup) ---")
+        print(f"  {'Metric':<30} {'DRL Agent':>12} {'DRPS':>12} {'Kademlia':>12}")
+        print(f"  {'-'*70}")
+
+        rl_late   = np.mean(rl_latencies[-500:])
+        drps_late = np.mean(drps_latencies[-500:])
+        kad_late  = np.mean(kad_latencies[-500:])
+        print(f"  {'Avg Latency (ms)':<30} {rl_late:>12.2f} {drps_late:>12.2f} {kad_late:>12.2f}")
+
+        rl_cost_late   = np.mean(rl_costs[-500:])
+        drps_cost_late = np.mean(drps_costs[-500:])
+        kad_cost_late  = np.mean(kad_costs[-500:])
+        print(f"  {'Avg Cost per Placement':<30} {rl_cost_late:>12.6f} {drps_cost_late:>12.6f} {kad_cost_late:>12.6f}")
+
+        rl_up_late   = np.mean(rl_uptimes[-500:])
+        drps_up_late = np.mean(drps_uptimes[-500:])
+        kad_up_late  = np.mean(kad_uptimes[-500:])
+        print(f"  {'Avg Node Uptime':<30} {rl_up_late:>12.4f} {drps_up_late:>12.4f} {kad_up_late:>12.4f}")
+
+        # improvement deltas
+        print(f"\n  --- DRL Improvement Over Baselines ---")
+        if drps_late > 0:
+            print(f"  DRL vs DRPS  latency improvement: {((drps_late - rl_late) / drps_late * 100):+.1f}%")
+        if kad_late > 0:
+            print(f"  DRL vs Kademlia latency improvement: {((kad_late - rl_late) / kad_late * 100):+.1f}%")
 
     print(f"\n  Results saved to: {output_dir}")
     print(f"  Now run: python benchmark\\plot_results.py")
