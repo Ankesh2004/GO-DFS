@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -117,7 +118,10 @@ func (ts *TombstoneStore) load() {
 
 	var list []Tombstone
 	if err := json.Unmarshal(data, &list); err != nil {
-		return // corrupted file — start fresh, will be overwritten on next Kill
+		backupPath := ts.path + ".corrupt"
+		os.Rename(ts.path, backupPath)
+		fmt.Printf("[TombstoneStore] WARNING: %s is corrupted! Backed up to %s. Starting fresh.\n", ts.path, backupPath)
+		return
 	}
 	for _, t := range list {
 		ts.entries[t.ChunkKey] = t
@@ -137,5 +141,10 @@ func (ts *TombstoneStore) save() error {
 	if err := os.MkdirAll(filepath.Dir(ts.path), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(ts.path, data, 0644)
+
+	tmpPath := ts.path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, ts.path)
 }
