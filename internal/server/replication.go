@@ -387,14 +387,21 @@ func (s *FileServer) runReplicationAudit() {
 	}
 	var underActions, overActions []chunkAction
 
+	networkSize := len(s.DHT.RoutingTable.GetAllNodes()) + 1
+
+	effectiveTarget := ReplicaTarget
+	if networkSize < effectiveTarget {
+		effectiveTarget = networkSize
+	}
+
 	for _, chunkKey := range allChunks {
 		holders := holderMap[chunkKey]
 		count := len(holders)
 		switch {
-		case count < ReplicaTarget:
+		case count < effectiveTarget:
 			underReplicated++
 			underActions = append(underActions, chunkAction{chunkKey, holders})
-		case count > ReplicaTarget:
+		case count > effectiveTarget:
 			overReplicated++
 			overActions = append(overActions, chunkAction{chunkKey, holders})
 		default:
@@ -537,13 +544,20 @@ func (s *FileServer) handleUnderReplication(chunkKey string, holders holderSet) 
 		return
 	}
 
-	needed := ReplicaTarget - len(holders)
+	networkSize := len(s.DHT.RoutingTable.GetAllNodes()) + 1
+
+	effectiveTarget := ReplicaTarget
+	if networkSize < effectiveTarget {
+		effectiveTarget = networkSize
+	}
+
+	needed := effectiveTarget - len(holders)
 	if needed <= 0 {
 		return
 	}
 
 	fmt.Printf("[%s] Chunk %s under-replicated (%d/%d), need %d more copies\n",
-		s.Transport.Addr(), truncateKey(chunkKey, 16), len(holders), ReplicaTarget, needed)
+		s.Transport.Addr(), truncateKey(chunkKey, 16), len(holders), effectiveTarget, needed)
 
 	targetID := dht.NewID(chunkKey)
 	candidates := s.NetworkLookup(targetID)

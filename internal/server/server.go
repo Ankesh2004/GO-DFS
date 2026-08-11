@@ -733,6 +733,9 @@ func (s *FileServer) handleMessageGetFile(from string, msg MessageGetFile) error
 
 	if directConn {
 		// Fast path: direct TCP streaming
+		peer.Lock()
+		defer peer.Unlock()
+		
 		peer.Send([]byte{p2p.IncomingStream})
 		binary.Write(peer, binary.LittleEndian, fileSize)
 		n, err := io.Copy(peer, r)
@@ -836,11 +839,16 @@ func (s *FileServer) sendToPeer(peer p2p.Peer, msg *Message) error {
 	msgBytes := buf.Bytes()
 	msgLen := uint32(len(msgBytes))
 
-	peer.Send([]byte{p2p.IncomingMessage})
-	if err := binary.Write(peer, binary.LittleEndian, msgLen); err != nil {
-		return err
-	}
-	return peer.Send(msgBytes)
+	// Write everything as a single TCP frame to prevent interleaving
+	// when multiple goroutines (heartbeat, replication, etc) send to the same peer concurrently
+	frame := make([]byte, 1+4+len(msgBytes))
+	frame[0] = p2p.IncomingMessage
+	binary.LittleEndian.PutUint32(frame[1:5], msgLen)
+	copy(frame[5:], msgBytes)
+
+	peer.Lock()
+	defer peer.Unlock()
+	return peer.Send(frame)
 }
 
 // -------- GetFile / StoreData --------

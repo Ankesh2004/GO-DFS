@@ -8,6 +8,8 @@ type Peer interface {
 	net.Conn // COMPOSITION : can hold net.TCPConn, net.QUICConn etc
 	Send([]byte) error
 	CloseStream() error
+	Lock()
+	Unlock()
 }
 
 // High level transport interface : will be used further for TCP , QUIC etc

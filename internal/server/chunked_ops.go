@@ -136,6 +136,9 @@ func (s *FileServer) handleRelayStream(from string, rpc p2p.RPC) error {
 	fmt.Printf("[%s] Piping relay stream %s → %s (%d bytes)\n",
 		s.Transport.Addr(), meta.OriginAddr, meta.TargetAddr, meta.TotalSize)
 
+	targetPeer.Lock()
+	defer targetPeer.Unlock()
+
 	// write the type marker + header to the target so they know what's coming
 	if _, err := targetPeer.Write([]byte{p2p.IncomingRelayStream}); err != nil {
 		_, _ = io.CopyN(io.Discard, sourcePeer, meta.TotalSize)
@@ -183,6 +186,9 @@ func (s *FileServer) sendRelayStream(relayPeer p2p.Peer, targetAddr string, key 
 
 	// write the type marker — exactly once. writeRelayStreamHeader does NOT
 	// write the marker byte, it only writes [4-byte len][gob header].
+	relayPeer.Lock()
+	defer relayPeer.Unlock()
+	
 	if err := relayPeer.Send([]byte{p2p.IncomingRelayStream}); err != nil {
 		return fmt.Errorf("failed to send relay stream marker: %w", err)
 	}

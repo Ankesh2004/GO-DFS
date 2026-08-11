@@ -22,6 +22,7 @@ type TCPPeer struct {
 	// when CloseStream is called without an active stream
 	streamMu     sync.Mutex
 	streamActive bool
+	sendMutex    sync.Mutex
 }
 
 func NewTCPPeer(isOutbound bool, conn net.Conn) (Peer, error) {
@@ -59,6 +60,14 @@ func (p *TCPPeer) Send(data []byte) error {
 }
 func (p *TCPPeer) RemoteAddr() net.Addr {
 	return p.Conn.RemoteAddr()
+}
+
+func (p *TCPPeer) Lock() {
+	p.sendMutex.Lock()
+}
+
+func (p *TCPPeer) Unlock() {
+	p.sendMutex.Unlock()
 }
 
 // ============ TCP Transport options (configurations required to create a transport) ============
