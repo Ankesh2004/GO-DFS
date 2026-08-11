@@ -11,7 +11,7 @@ Recently, I've poured a ton of work into stabilizing the network and adding some
 - **Zero-Dependency Core**: Built directly on top of standard Go network primitives (`net`, `crypto`, `golang.org/x/crypto`), giving complete control over every wire byte.
 - **Next.js Web Dashboard (New!)**: A modern, fully-integrated Next.js 16 dashboard for visual node monitoring, peer tracking, and file transfer management. It's wired directly to the local HTTP API!
 - **RL Sidecar Integration (New!)**: We now run a Reinforcement Learning sidecar that observes network health and intelligently optimizes chunk replication and placement.
-- **Kademlia DHT Routing**: Custom, robust implementation of Kademlia with 256-bit XOR distance metrics, $K=20$ routing tables, and proactive peer discovery loops. 
+- **Kademlia DHT Routing**: Custom, robust implementation of Kademlia with 256-bit XOR distance metrics, $K=20$ routing tables, and proactive peer discovery loops. Includes **Iterative Kademlia Lookup** ($\alpha=3$) for multi-hop `FIND_NODE` network convergence!
 - **Local Loopback P2P Stabilization**: Massive improvements to the local loopback testing mesh—no more dropped connections or zombie nodes during local cluster simulations. 
 - **End-to-End Encryption**: Data is encrypted before network transport using ChaCha20-Poly1305 AEAD with 24-byte incremental nonces and per-user key management.
 - **Content-Addressed Storage (CAS)**: Files and chunks are hashed using SHA-256 and stored in an optimized 4-level nested directory structure.
@@ -135,7 +135,6 @@ Open [http://localhost:3000](http://localhost:3000) to see your nodes, peer topo
 ## 🔮 Future Work
 
 While a lot has been accomplished (especially the UI API wiring and RL sidecar!), there's still more to do:
-- **Iterative Kademlia Lookup**: Multi-hop `FIND_NODE` convergence.
 - **Erasure Coding (Reed-Solomon)**: Splitting chunks into parity pieces.
 - **Connection Multiplexing**: Moving to Yamux or QUIC.
 - **Storage Quotas**: Enforcing disk bounds with LRU eviction.
