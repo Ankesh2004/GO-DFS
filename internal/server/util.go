@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Ankesh2004/GO-DFS/pkg/crypto"
+	"github.com/klauspost/compress/zstd"
 )
 
 // function variables so chunked_ops can use them without importing directly.
@@ -67,6 +68,28 @@ func DecryptStream(userKey []byte, src io.Reader, dst io.Writer) error {
 	if _, err := io.ReadFull(src, nonce); err != nil {
 		return fmt.Errorf("failed to read nonce: %w", err)
 	}
-	_, err := crypto.Decrypt(userKey, nonce, src, dst)
-	return err
+
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer pw.Close()
+		_, err := crypto.Decrypt(userKey, nonce, src, pw)
+		if err != nil {
+			pw.CloseWithError(err)
+		}
+		errCh <- err
+	}()
+
+	zReader, err := zstd.NewReader(pr)
+	if err != nil {
+		return err
+	}
+	defer zReader.Close()
+
+	if _, err := io.Copy(dst, zReader); err != nil {
+		return err
+	}
+
+	return <-errCh
 }

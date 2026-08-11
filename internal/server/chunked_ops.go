@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"golang.org/x/time/rate"
 
 	"github.com/Ankesh2004/GO-DFS/internal/storage"
@@ -508,6 +509,24 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 
 	pr, pw := io.Pipe()
 	encryptErr := make(chan error, 1)
+
+	compressPR, compressPW := io.Pipe()
+
+	// Thread 1: Compress the raw file bytes
+	go func() {
+		defer compressPW.Close()
+		zWriter, err := zstd.NewWriter(compressPW)
+		if err != nil {
+			compressPW.CloseWithError(err)
+			return
+		}
+		if _, err := io.Copy(zWriter, r); err != nil {
+			compressPW.CloseWithError(err)
+		}
+		zWriter.Close()
+	}()
+
+	// Thread 2: Encrypt the compressed bytes
 	go func() {
 		defer pw.Close()
 		// prepend the nonce so the decryptor knows what it is
@@ -516,7 +535,7 @@ func (s *FileServer) StoreDataChunked(originalName string, userEncryptionKey []b
 			encryptErr <- err
 			return
 		}
-		_, err := encryptFn(userEncryptionKey, userNonce, r, pw)
+		_, err := encryptFn(userEncryptionKey, userNonce, compressPR, pw)
 		if err != nil {
 			pw.CloseWithError(err)
 		}
