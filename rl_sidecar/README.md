@@ -1,48 +1,62 @@
-# RL Placement Sidecar
+# 🧠 RL Placement Sidecar
 
-A DDPG-based placement optimizer that runs alongside each GO-DFS node.
+> "the brain behind where your data actually goes."
 
-## Setup
+Hey! So this is the Python RL sidecar for GO-DFS. It runs alongside each Go node and uses a **Deep Deterministic Policy Gradient (DDPG)** agent to figure out the absolute best nodes to place our chunks on. 
+
+We had to build this because simple heuristics just don't cut it when you have a bunch of P2P nodes lying about their latency.
+
+## 🏗️ Environment
+
+The agent takes in a bunch of candidate nodes (up to `K` candidates, default 20) and spits out the top `R` nodes. 
+Each candidate has a feature vector of 11 dimensions:
+- **Performance**: Latency (claimed vs actual RTT), bandwidth, available capacity.
+- **Cost**: Cost per GB/hour.
+- **Reliability**: Uptime ratio, avg session length, hardware tier (NVMe, SSD, HDD).
+- **Trust**: Divergence between claimed latency and actual heartbeat RTT.
+
+<!-- honestly the trust metric is super important here, it basically catches nodes that are spoofing their stats to get more traffic. -->
+
+## 🎯 Reward Function
+
+Getting the reward right was tricky, so it's split into three signals:
+
+1. **Phase A (Immediate Dense Reward)**: We give it instant feedback based on the profile estimates. It's a weighted sum of latency, cost, reliability, capacity, and trust divergence. 
+2. **Phase B (Trust Calibration)**: Continuous updates based on heartbeat RTTs. If a node is lagging, the agent learns to avoid it.
+3. **Phase C (Retroactive Eviction Penalty)**: This is the cool part. If a node suddenly dies, we go back in time (credit assignment) and slap a massive penalty (`-100`) on past placements that picked this dead node. It literally learns from its past mistakes!
+
+## 🤖 Inference Model
+
+- **Architecture**: DDPG (Actor-Critic). Both networks use 2 hidden layers of 128 units.
+- **Actor**: Maps candidate state vectors to action scores (higher is better).
+- **Critic**: Estimates the Q-value of the placement decision.
+- **Exploration**: Uses Ornstein-Uhlenbeck (OU) noise so the agent tries new nodes sometimes instead of just sticking to the same old ones.
+
+<!-- note: for the first 500 steps, we just use a basic heuristic math formula so the day-1 performance isn't complete garbage while the neural net warms up. -->
+
+## 🔌 Integration with the Go node via ZeroMQ
+
+While the current `server.py` implementation exposes a Flask HTTP API for testing, the production architecture integrates with the Go node via **ZeroMQ** for ultra-low latency IPC. 
+
+The Go node fires over the candidate profiles via a ZMQ socket, and the Python sidecar shoots back the selected targets and a `placement_id` to track it. 
+
+### Current Endpoints (HTTP fallback)
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/optimize_placement` | Get the top R nodes |
+| `POST` | `/record_outcome` | Tell the agent how the latency actually was |
+| `POST` | `/record_eviction` | Node dropped! Apply the retroactive penalty |
+| `POST` | `/calibrate_trust` | Feed in heartbeat RTTs |
+| `GET`  | `/health` | Check warmup status and buffer sizes |
+
+## 🚀 Setup & Running
 
 ```bash
 cd rl_sidecar
 pip install -r requirements.txt
-```
 
-## Running
-
-```bash
-# default port 5100
+# Start the sidecar (default port 5100)
 python server.py
-
-# custom port
-RL_PORT=5200 python server.py
 ```
 
-## How it works
-
-The Go node sends candidate profiles (hardware tier, latency, cost, uptime, RTT) to this sidecar via HTTP. The DDPG agent scores each candidate and returns the optimal `R` nodes for chunk placement.
-
-### Three reward signals
-
-1. **Dense immediate** — profile-estimated latency + cost + reliability penalty on every placement
-2. **Trust calibration** — heartbeat RTT vs claimed latency divergence (continuous)
-3. **Eviction penalty** — `-100` reward retroactively applied when a node dies
-
-### Endpoints
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | `/optimize_placement` | Pick best R nodes from K candidates |
-| POST | `/record_outcome` | Report actual placement latency |
-| POST | `/record_eviction` | Node died — apply penalty |
-| POST | `/calibrate_trust` | Heartbeat RTT for trust scoring |
-| GET | `/health` | Status check |
-
-### Heuristic Bootstrap
-
-For the first 500 placements, the agent uses a weighted heuristic scorer (uptime × 2 - latency × 0.1 - cost × 10) instead of the neural network. This gives decent day-1 performance while the DDPG model collects training data.
-
-## Configuration
-
-Edit `config.py` to tune reward weights, network architecture, and exploration parameters.
+<!-- Don't forget to tweak config.py if you want to change the reward weights! For example, crank up W_RELIABILITY if nodes keep churning. -->
