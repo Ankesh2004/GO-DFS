@@ -154,8 +154,11 @@ class DDPGAgent:
 
         for idx in selected_indices:
             c = candidates[idx]
-            total_latency += c.get("latency_ms", 5.0)
-            total_cost += c.get("cost_per_gb_hour", 0.01)
+            # FLAW FIX: normalize these metrics to [0, 1] range.
+            # previously raw latency (e.g. 50ms) completely dwarfed p_fail (0.05),
+            # causing the agent to overfit latency and ignore node reliability.
+            total_latency += c.get("latency_ms", 5.0) / 100.0
+            total_cost += c.get("cost_per_gb_hour", 0.01) * 100.0
             total_pfail += (1.0 - c.get("uptime_ratio", 0.5))
 
             available = c.get("available_mb", 0)
@@ -184,6 +187,7 @@ class DDPGAgent:
         """
         n_candidates = min(len(candidates), self.max_candidates)
         state = self._build_feature_vector(candidates)
+        action = np.zeros(self.max_candidates, dtype=np.float32)
 
         if self.total_steps < config.WARMUP_STEPS:
             # heuristic bootstrap — weighted scoring so day-1 performance isn't garbage.
@@ -198,15 +202,21 @@ class DDPGAgent:
                 scores.append(score)
             sorted_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
             selected = sorted_idx[:needed]
+            
+            # mock continuous action for replay buffer
+            for i in range(n_candidates):
+                action[i] = 1.0 if i in selected else -1.0
         else:
             # actor network + exploration noise
             state_tensor = torch.FloatTensor(state).unsqueeze(0)
             with torch.no_grad():
                 action = self.actor(state_tensor).squeeze(0).numpy()
 
-            # add OU noise for exploration
-            noise = self.noise.sample()[:n_candidates]
-            action[:n_candidates] += noise
+            # FLAW FIX: decay exploration noise over time so the agent can exploit its learned policy
+            decay = max(0.0, 1.0 - (self.total_steps - config.WARMUP_STEPS) / 8000.0)
+            noise = self.noise.sample() * decay
+            action += noise
+            action = np.clip(action, -1.0, 1.0)
 
             # pick the top-R scoring candidates
             candidate_scores = action[:n_candidates]
@@ -215,24 +225,21 @@ class DDPGAgent:
         # generate a placement ID for tracking
         placement_id = str(uuid.uuid4())[:8]
 
-        # build action vector for the replay buffer
-        action_vec = np.zeros(self.max_candidates, dtype=np.float32)
-        for idx in selected:
-            action_vec[idx] = 1.0
-
         # compute immediate reward
         reward = self._compute_reward(candidates[:n_candidates], selected)
 
-        # store in replay buffer for training
-        # (next_state is the same as state for now — gets updated on next placement)
-        self.replay_buffer.push(state, action_vec, reward, state, False)
+        # FLAW FIX: Store the CONTINUOUS action in the replay buffer.
+        # Previously, a binary [0, 1] vector was stored. The Critic was trained on binary 
+        # vectors, but evaluated on continuous [-1, 1] vectors from the Actor during backprop, 
+        # which resulted in out-of-distribution garbage gradients!
+        self.replay_buffer.push(state, action.copy(), reward, state, False)
 
         # record placement for retroactive eviction penalties
         target_addrs = [candidates[i].get("addr", "") for i in selected]
         self.placement_history[placement_id] = {
             "targets": target_addrs,
             "state": state.copy(),
-            "action": action_vec.copy(),
+            "action": action.copy(),
             "reward": reward,
         }
         self.placement_order.append(placement_id)
