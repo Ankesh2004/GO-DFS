@@ -8,37 +8,193 @@ It brings together Kademlia DHT routing, local content-addressed storage (CAS), 
 
 ## Key Capabilities
 
-- **Content-Addressed Chunked Storage**: Files are encrypted with AES-GCM, hashed into SHA-256 Content Identifiers (CIDs), split into 1MB chunks, and cataloged via GOB-encoded `FileManifest` objects.
+- **Content-Addressed Chunked Storage**: Files are encrypted with ChaCha20-Poly1305 AEAD, hashed into SHA-256 Content Identifiers (CIDs), split into 8MB chunks using pooled memory buffers, and cataloged via GOB-encoded `FileManifest` objects.
 - **Zero-Trust Chunk Verification**: Every incoming chunk's payload is hashed and verified against its content key (`verifyChunkHash`) before committing to disk, preventing network data corruption or poisoning attacks.
-- **Relay & Multi-Hop Networking**: Facilitates NAT-to-NAT communication through public bootstrap and relay nodes (`RelayOnly=true`) using TTL-bounded envelope forwarding (`MessageRelay`) and raw stream piping (`RelayStreamMeta`).
+- **Relay & Multi-Hop Networking**: Facilitates NAT-to-NAT communication through public bootstrap and relay nodes (`RelayOnly=true`) using TTL-bounded envelope forwarding (`MessageRelay`) and low-allocation streaming piping (`RelayStreamMeta`).
 - **Automated Health & Replication Audit**: Continuously pings peers via heartbeats, tracks latency and session metrics (`PeerHealth`), evicts non-responsive nodes, and enforces replica target constraints (`ReplicaTarget = 3`) through a two-phase audit mechanism.
 - **Network-Wide Deletions & Tombstoning**: Implements tombstone persistence (`TombstoneStore`) to safely delete files across distributed peers and synchronizes offline peers on reconnection (`MessageTombstoneSync`).
 - **Authenticated Control API**: Exposes a localhost-only HTTP daemon (`127.0.0.1`) secured by API token authentication for command-line file uploads, downloads, peer monitoring, and system metrics.
 
 ---
 
-## Package Architecture
+## 📊 Core Server Execution Flows & Architecture Diagrams
+
+### 1. End-to-End Streaming File Upload (`StoreDataChunked`)
 
 ```mermaid
 flowchart TD
-    CLI[CLI / Client] -->|HTTP Control API| API[APIServer - api.go]
-    API --> FS[FileServer - server.go]
+    In[Plaintext Input Stream] --> Enc["Streaming AEAD Encrypt (ChaCha20-Poly1305)"]
+    Enc --> Pipe[io.Pipe & io.TeeReader]
+    Pipe --> Hash[Compute SHA-256 File CID]
+    Pipe --> Chunker["Chunker: Slices into 8MB chunks (sync.Pool)"]
     
-    subgraph Core Engine [internal/server]
-        FS --> DHT[Kademlia DHT - pkg/dht]
-        FS --> Store[CAS Store - internal/storage]
-        FS --> Ledger[Chunk Ledger - internal/storage]
-        FS --> Index[CID Index - internal/storage]
-        FS --> Tombstones[Tombstone Store - internal/storage]
+    Chunker --> CAS[Store chunks in local CAS & ChunkLedger]
+    CAS --> Manifest["Create FileManifest (<CID>.manifest)"]
+    Manifest --> DHT["NetworkLookup(CID): Discover K closest peers"]
+    DHT --> Opt["RL Optimizer / Placement: Pick optimal replica targets"]
+    
+    Opt --> Push["pushChunkToAddr(): Replicate manifest & chunks"]
+    Push --> Idx["Record File in CIDIndex (cid_index.json)"]
+```
+
+### 2. Parallel Chunk Retrieval & Reassembly (`GetFileChunked`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Local Node
+    participant Net as Remote Peers
+    participant Fetcher as Parallel Fetcher (4 Workers)
+    participant CAS as Local CAS Store
+
+    Note over Client: 1. Check local CAS for <CID>.manifest
+    alt Manifest Missing Locally
+        Client->>Net: Broadcast MessageGetManifest(Key)
+        Net-->>Client: MessageManifestResponse(Manifest)
+        Client->>CAS: Store Manifest locally
     end
 
-    FS --> ChunkOps[Chunk & Manifest Operations - chunked_ops.go]
-    FS --> RelayOps[Relay & Routing Engine - server.go / chunked_ops.go]
-    FS --> ReplOps[Replication & Heartbeat Audit - replication.go]
-    FS --> DelOps[Tombstone Deletion Lifecycle - delete_ops.go]
+    Note over Client: 2. Check local disk for missing chunk CIDs
+    Client->>Fetcher: fetchChunksParallel(missingChunkKeys)
+    par Fetch Chunks Concurrently (Max 4 Workers)
+        Fetcher->>Net: MessageGetChunk(ChunkKey 0)
+        Fetcher->>Net: MessageGetChunk(ChunkKey 1)
+        Net-->>Fetcher: MessageChunkData(ChunkKey 0)
+        Net-->>Fetcher: MessageChunkData(ChunkKey 1)
+    end
 
-    ChunkOps <-->|P2P Streaming / GOB RPC| Transport[P2P Transport Layer - pkg/p2p]
-    RelayOps <-->|Multi-Hop Forwarding| Peers[Remote Peer Nodes]
+    Note over Fetcher: 3. Zero-Trust Verification: verifyChunkHash()
+    Fetcher->>CAS: WriteRaw(ChunkKey, Data)
+    Note over Client: 4. Reassemble chunks into sequential multiReadCloser
+    Client-->>Client: Return io.MultiReader(Chunk0, Chunk1, ...)
+```
+
+### 3. Streaming Multi-Hop Relay Execution (`0x03` RelayStreamMeta)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Origin as Origin Node (NAT Behind)
+    participant Relay as Public Bootstrap Relay Node
+    participant Target as Target Node (NAT Behind)
+
+    Origin->>Relay: Opcode 0x03 + RelayStreamMeta Header<br/>(TargetAddr, OriginAddr, Key, TotalSize)
+    Relay->>Relay: Parse GOB Header & Check RelayBWLimit (rate.Limiter)
+    Relay->>Target: Dial TargetAddr & Send Opcode 0x03 + Header
+    Note over Relay: Pipes bytes using 32KB buffer (relayBufPool)<br/>ZERO whole-chunk RAM accumulation!
+    Origin->>Relay: Stream TotalSize payload bytes
+    Relay->>Target: Stream TotalSize payload bytes
+    Target->>Target: verifyChunkHash(Key, Data) -> Commit to CAS
+```
+
+### 4. Peer Connection Handshake & Address Mapping (`PeerExchange`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant NodeA as Node A
+    participant NodeB as Node B
+
+    NodeA->>NodeB: Raw TCP Connection Established
+    Note over NodeA,NodeB: X25519 Ephemeral Handshake (SecurePeer)
+    NodeA->>NodeB: MessagePeerExchange(ID, AdvertisedListenAddr, Profile, KnownPeers)
+    NodeB->>NodeB: Map Raw TCP RemoteAddr -> AdvertisedListenAddr (addrMap)
+    NodeB->>NodeB: AddNode to Kademlia Routing Table (DHT)
+    NodeB-->>NodeA: MessagePeerExchange(ID, AdvertisedListenAddr, Profile, KnownPeers)
+    NodeA->>NodeA: Map Raw TCP RemoteAddr -> AdvertisedListenAddr (addrMap)
+    NodeA->>NodeA: AddNode to Kademlia Routing Table (DHT)
+    NodeA->>NodeB: MessageTombstoneSync (Exchange active deletions)
+```
+
+### 5. Peer Heartbeat & Dead Node Eviction Pipeline (`heartbeatLoop`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Loop as heartbeatLoop (Every 15s)
+    participant Server as FileServer
+    participant Peer as Remote Peer
+    participant DHT as RoutingTable
+    participant Opt as RL Optimizer Sidecar
+    participant Audit as Replication Auditor
+
+    Loop->>Server: runHeartbeat()
+    Server->>Peer: MessagePing{}
+    alt Peer Responded (MessagePong)
+        Peer-->>Server: MessagePong{}
+        Server->>Server: RecordRTT (EMA alpha=0.3) & Accumulate TotalUptime
+        Server->>Opt: RecordRTT(PeerAddr, AvgRTTMs)
+    else Peer Missed Pings (MissedPings >= 3)
+        Server->>Server: Close TCP Socket & Delete from peers map
+        Server->>DHT: RemoveNode(PeerID)
+        Server->>Opt: RecordEviction(PeerAddr) (Negative RL Penalty)
+        Server->>Audit: go s.runReplicationAudit() (Trigger Emergency Audit!)
+    end
+```
+
+### 6. Two-Phase Anti-Entropy Replication Audit (`runReplicationAudit`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Audit as Replication Auditor (Every 60s)
+    participant Ledger as Local ChunkLedger
+    participant Peers as Connected Network Peers
+    participant Target as Candidate Replica Target
+
+    Note over Audit: === Phase 1: Batch Collection (Under auditLock) ===
+    Audit->>Ledger: ChunkLedger.All() (Scan ALL chunks & replicas)
+    Audit->>Peers: MessageBatchChunkQuery (Pages of 500 Chunk CIDs)
+    Peers-->>Audit: MessageBatchChunkResponse (HeldChunks list + Profile)
+    Note over Audit: Single 3s timeout across all pages (batchAudit collector)
+
+    Note over Audit: === Phase 2: Lock-Free Repair (Outside any locks) ===
+    alt Count < ReplicaTarget (3) -> Under-Replication
+        Note over Audit: SelectOptimalNodes (RL Sidecar or DHT Fallback)
+        Audit->>Target: pushChunkToAddr(Target, ChunkKey)
+    else Count > ReplicaTarget (3) -> Over-Replication
+        alt File Owned by Local Node (buildOwnedChunkSet)
+            Note over Audit: Keep local copy (Do NOT drop our own files!)
+        else Excess Replica from other node
+            Audit->>Audit: Drop local excess replica (MessageDropChunk)
+        end
+    end
+```
+
+### 7. Closed-Loop RL Placement Optimization
+
+```mermaid
+flowchart TD
+    Req[Store / Re-Replicate Chunk] --> Cands[Build K Candidate Nodes with Profiles]
+    Cands --> JSON[Serialize to JSON: Latency, Cost, Tier, Uptime, RTT]
+    JSON --> Post[POST /optimize_placement to Python Sidecar]
+    
+    Post --> Fallback{"Sidecar Online?"}
+    Fallback -- No --> DHTFallback["Kademlia XOR Distance Fallback"]
+    Fallback -- Yes --> Model["Evaluate Policy Network (PPO / DQN)"]
+    Model --> Targets["Return Top R Target Nodes + PlacementID"]
+    
+    Targets --> Push["Push Chunks to Target Nodes"]
+    DHTFallback --> Push
+    
+    Push --> Feedback["POST /record_outcome (DurationMs, Success)"]
+    Feedback --> Learn["Online Policy Gradient Update"]
+```
+
+### 8. Distributed File Deletion & Background GC
+
+```mermaid
+flowchart TD
+    Cmd["DeleteFile(CID)"] --> Load["Load FileManifest (<CID>.manifest)"]
+    Load --> Kill["Atomically Tombstone Manifest + All Chunks (tombstones.Kill)"]
+    Kill --> CAS["Delete Bytes from Local CAS Store & ChunkLedger"]
+    CAS --> Bcast["broadcastDeleteToNetwork (MessageDeleteFile)"]
+    Bcast --> Index["Remove CID from Local CIDIndex"]
+    
+    subgraph GC [Background Garbage Collector - gcLoop (Every 10 min)]
+        Sweep["Sweep Tombstones"] --> DiskCheck["Remove any residual CAS files"]
+        DiskCheck --> Prune["Prune Tombstones older than 30 Days (TombstoneTTL)"]
+    end
 ```
 
 ---
@@ -64,8 +220,8 @@ flowchart TD
 ### 1. Content-Addressed Chunking & Verification ([`chunked_ops.go`](file:///c:/UNIVERSE/Projects/GO-DFS/internal/server/chunked_ops.go))
 
 File storage follows a pipeline:
-1. **Encryption**: Input stream `io.Reader` is encrypted using AES-GCM with a user-supplied key and random nonce.
-2. **Hashing & Chunking**: The encrypted stream is passed through a `TeeReader` with SHA-256 to calculate the Content Identifier (CID). Simultaneously, `storage.ChunkAndStore` partitions the stream into fixed 1MB chunks (hash-keyed by content).
+1. **Encryption**: Input stream `io.Reader` is encrypted using ChaCha20-Poly1305 AEAD with a user-supplied key and 24-byte nonce.
+2. **Hashing & Chunking**: The encrypted stream is passed through a `TeeReader` with SHA-256 to calculate the Content Identifier (CID). Simultaneously, `storage.ChunkAndStore` partitions the stream into fixed 8MB chunks using `sync.Pool`.
 3. **Manifest Construction**: A `FileManifest` is built listing `OriginalKey`, `TotalSize`, `ChunkSize`, and ordered `ChunkKeys`. The manifest is stored in local CAS as `<CID>.manifest`.
 4. **Replication**: The manifest and chunks are distributed to candidate peers.
 5. **Parallel Fetching**: Downloading a file (`GetFileChunked`) reads the manifest, identifies missing chunks, and spawns up to 4 concurrent worker goroutines (`fetchChunksParallel`) to retrieve them from nearest DHT peers. Each retrieved chunk hash is validated using `verifyChunkHash`.

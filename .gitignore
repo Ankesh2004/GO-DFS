@@ -5,6 +5,8 @@
 *.so
 *.dylib
 
+.gocache
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -39,3 +41,5 @@ myFiles/
 
 # DRL 
 .drl_env/
+rl_sidecar/checkpoints/
+*.pt

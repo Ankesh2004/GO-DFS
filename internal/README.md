@@ -7,11 +7,27 @@ Welcome to the internal architecture of **GO-DFS**, a high-performance distribut
 ---
 
 ## 🏗️ Overview
-
+ 
 The `internal/` directory is logically separated into:
 
 - **Server (`internal/server/`)**: Handles all node-to-node communication, routing, metrics, HTTP API endpoints, and the complex replication logic.
 - **Storage (`internal/storage/`)**: Manages the local on-disk storage, chunking, CID index mapping, and tombstone management for deleted chunks.
+
+```mermaid
+flowchart TD
+    API["HTTP REST API (:9000)"] --> Server["FileServer Engine (internal/server)"]
+    Server --> Chunker["Chunker (8MB + sync.Pool)"]
+    Server --> Placement["DHT / RL Placement Engine"]
+    Server --> Replication["Replication Audit Loop"]
+
+    Chunker --> CAS["CAS Store (4-Level Fanout Disk)"]
+    Chunker --> Ledger["ChunkLedger (All Chunks On Disk)"]
+    Server --> CIDIdx["CIDIndex (User File Metadata)"]
+    Server --> Tombstones["TombstoneStore (Delete Journal)"]
+
+    Replication --> Ledger
+    Replication --> Tombstones
+```
 
 ---
 

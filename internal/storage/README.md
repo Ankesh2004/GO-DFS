@@ -14,6 +14,121 @@ The storage layer is built for distributed, fault-tolerant, zero-trust file stor
 
 ---
 
+## 📊 Storage Architecture & Execution Flows
+
+### 1. 4-Level CAS Directory Fanout
+
+```mermaid
+flowchart TD
+    Key["Input Key / Data"] --> SHA["SHA-256 Hash (64 Hex Characters)"]
+    SHA --> T1["Tier 1: hash[00:08]"]
+    T1 --> T2["Tier 2: hash[08:16]"]
+    T2 --> T3["Tier 3: hash[16:24]"]
+    T3 --> T4["Tier 4: hash[24:32]"]
+    T4 --> File["Filename: hash[00:64] (Raw Binary Chunk)"]
+```
+
+### 2. High-Throughput Pooled Chunking Pipeline & Buffer Lifecycle
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Stream as Input Stream (io.Reader)
+    participant Pool as Global sync.Pool
+    participant Chunker as ChunkAndStore Loop
+    participant CAS as Local CAS Store
+
+    Chunker->>Pool: bufPool.Get() (Borrow pre-allocated 8MB buffer)
+    Stream->>Chunker: io.ReadFull(src, buf[:8MB])
+    Note over Chunker: Reads up to 8MB.<br/>ErrUnexpectedEOF = final chunk
+    Chunker->>Chunker: Compute SHA-256 CID of raw chunk bytes
+    Chunker->>CAS: WriteRaw(chunkCID, chunkBytes)
+    Chunker->>Pool: bufPool.Put(bufPtr) (Returned immediately to pool!)
+    Note over Chunker,Pool: Zero GC heap allocation pressure
+    Chunker->>Chunker: Append ChunkResult(Index, CID, Size)
+```
+
+### 3. CIDIndex vs. ChunkLedger: Scope & Responsibility
+
+```mermaid
+flowchart TD
+    subgraph ClientOps [Client / HTTP API Uploads]
+        Upload["User uploads file.pdf"] --> StoreFile["Store & Chunk"]
+        StoreFile --> AddCID["CIDIndex.Add()<br/>cid_index.json"]
+    end
+
+    subgraph PeerReplication [Network Peer Ingress]
+        RemoteReplica["Peer sends Replica Chunk"] --> StoreChunk["CAS WriteRaw"]
+    end
+
+    StoreFile --> AddLedger1["ChunkLedger.AddBatch()<br/>chunk_ledger.json"]
+    StoreChunk --> AddLedger2["ChunkLedger.Add()<br/>chunk_ledger.json"]
+
+    subgraph Consumers [Subsystem Consumers]
+        AddCID --> WebUI["Web UI / CLI 'dfs ls'<br/>(Shows user files & sizes)"]
+        AddLedger1 --> RepAudit["Replication Audit Loop<br/>(Scans for under-replicated chunks)"]
+        AddLedger2 --> RepAudit
+    end
+```
+
+### 4. Atomic Index Persistence & In-Memory Rollback
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Storage Mutex
+    participant RAM as In-Memory Map
+    participant Disk as Local Filesystem
+
+    App->>RAM: Modify state in RAM (Lock)
+    App->>Disk: Write JSON to ".tmp" file
+    alt Write Succeeded
+        App->>Disk: Atomic os.Rename(".tmp", "target.json")
+        App->>RAM: Unlock (Commit)
+    else Write / Rename Failed
+        App->>RAM: Roll back in-memory map to previous state!
+        App->>RAM: Unlock (Abort)
+    end
+```
+
+### 5. Distributed Tombstone Anti-Entropy Barrier
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant NodeA as Node A (Deleter)
+    participant NodeB as Node B (Offline during delete)
+
+    Note over NodeA: 1. Delete Chunk & Record Tombstone in tombstones.json
+    NodeA->>NodeA: store.DeleteStream(CID)<br/>tombstones.Kill(CID)
+    Note over NodeB: 2. Node B reconnects to network
+    NodeA->>NodeB: TombstoneSync RPC (Broadcast all tombstones)
+    NodeB->>NodeB: Check tombstones.IsDead(CID)
+    alt Is Dead
+        NodeB->>NodeB: Delete local chunk replica & Record Tombstone
+    else Not Dead
+        NodeB->>NodeB: Keep chunk
+    end
+```
+
+---
+
+## 🔍 Deep Dive: Key Mechanical Concepts
+
+### 1. `io.ReadFull` and the `io.ErrUnexpectedEOF` Behavior
+When slicing a 20MB file into 8MB chunks:
+- **Chunk 0** reads exactly 8,388,608 bytes (`err == nil`).
+- **Chunk 1** reads exactly 8,388,608 bytes (`err == nil`).
+- **Chunk 2** attempts to read 8MB, but the stream ends after 4,194,304 bytes. `io.ReadFull` returns `n = 4194304` and `err = io.ErrUnexpectedEOF`.
+- In standard Go I/O, `ErrUnexpectedEOF` is an error; however, in a chunker, it cleanly indicates that the **final partial chunk was reached**. `ChunkAndStore` gracefully accepts this, persists the remaining bytes, and exits the loop.
+
+### 2. Node-Wide Ledger Rebuilding (`needsRebuild`)
+When `NewChunkLedger(rootDir)` runs:
+- If `chunk_ledger.json` is missing or corrupted, `load()` returns `needsRebuild = true`.
+- The server engine detects this and initiates a directory crawl across the CAS root to re-index all physical chunks existing on disk, ensuring no data is orphaned after a crash.
+
+---
+
 ## Key Components & API Reference
 
 ### 1. `Store` (CAS Filesystem Manager)

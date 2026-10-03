@@ -6,27 +6,54 @@
 
 ## 🏗 Architecture & Core Concepts
 
+```mermaid
+flowchart TD
+    subgraph DHTCoordinator [Kademlia DHT Coordinator]
+        Coord["NewKademlia(localID)"] --> RT["RoutingTable (256 K-Buckets)"]
+        Coord --> ShortList["ShortList (Target-Sorted Peer Candidates)"]
+    end
+
+    subgraph Buckets [256-Bit Address Space Organization]
+        RT --> B0["Bucket 0 (CPL = 0: Furthest Peers)"]
+        RT --> B1["Bucket 1 (CPL = 1)"]
+        RT --> BN["... Bucket 255 (CPL = 255: Nearest Neighbors)"]
+    end
+
+    subgraph Eviction [Speculative Eviction Policy]
+        FullCheck{"Bucket Full (len == 20)?"}
+        FullCheck -- No --> Append["Append Newcomer"]
+        FullCheck -- Yes --> Ping["Ping Oldest Head Node"]
+        Ping --> Alive{"Alive?"}
+        Alive -- Yes --> FavorOld["Move Oldest to Tail<br/>Drop Newcomer (Favor Veteran)"]
+        Alive -- No --> Replace["Evict Oldest<br/>Append Newcomer to Tail"]
+    end
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              Kademlia                                   │
-│  High-level coordinator wrapping RoutingTable & lookup sorting         │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-                                     ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│                            RoutingTable                                 │
-│  256 K-Buckets (K=20 per bucket) indexed by Common Prefix Length (CPL)  │
-│  Thread-safe access (sync.RWMutex) & pluggable PingFunc liveness check  │
-└────────────────────────────────────┬────────────────────────────────────┘
-                                     │
-             ┌───────────────────────┴───────────────────────┐
-             ▼                                               ▼
-┌─────────────────────────┐                     ┌─────────────────────────┐
-│        ID Space         │                     │   Address Discovery     │
-│ 256-bit (32-byte) keys  │                     │ STUN-like Public IP     │
-│ XOR Distance & CPL      │                     │ Local IP fallback       │
-└─────────────────────────┘                     └─────────────────────────┘
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Local as Local Node
+    participant Node1 as Peer 1 (Alpha 1)
+    participant Node2 as Peer 2 (Alpha 2)
+    participant Node3 as Peer 3 (Alpha 3)
+
+    Note over Local: 1. Initialize Shortlist = NearestNodes(TargetID, K=20)
+    Note over Local: 2. Pick top Alpha (3) unqueried peers
+    par Concurrently Query Alpha Nodes
+        Local->>Node1: FIND_NODE(TargetID)
+        Local->>Node2: FIND_NODE(TargetID)
+        Local->>Node3: FIND_NODE(TargetID)
+    end
+    Node1-->>Local: Returns its closest nodes to TargetID
+    Node2-->>Local: Returns its closest nodes to TargetID
+    Node3-->>Local: Returns its closest nodes to TargetID
+
+    Note over Local: 3. Merge new peers, deduplicate, and sort by XOR distance
+    Note over Local: 4. Repeat round until no closer peer is discovered (Convergence)
+    Note over Local: 5. Return Top K closest peers across network
 ```
+
+---
 
 ### 1. 256-bit Node & Key Identifier (`ID`)
 Nodes and keys reside in a 256-bit address space. Identifiers are generated using **SHA-256** hashes of strings (such as node addresses or file content hashes).

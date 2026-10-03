@@ -10,15 +10,19 @@ endpoints:
   POST /record_outcome      — report how a placement actually went
   POST /record_eviction     — a node died, apply penalty to past placements
   POST /calibrate_trust     — heartbeat RTT data for trust scoring
+  POST /save                — manually trigger a checkpoint save
   GET  /health              — quick status check
 """
 
 import os
 import sys
+import signal
+import atexit
 import logging
 from flask import Flask, request, jsonify
 
 from agent import DDPGAgent
+import config
 
 # keep flask quiet unless something breaks
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -26,9 +30,40 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 app = Flask(__name__)
 agent = DDPGAgent()
 
+# try to resume from the most recent checkpoint.
+# if there's nothing saved yet, the agent starts fresh (no big deal,
+# it'll just go through warmup again).
+agent.load_checkpoint()
+
 # counters for the /health endpoint
 eviction_penalties_total = 0
 trust_calibrations_total = 0
+
+
+def _save_on_exit():
+    """
+    last-ditch save when the process is shutting down.
+    without this, any training done since the last autosave is lost.
+    """
+    print("[RL Sidecar] Shutting down — saving final checkpoint...")
+    agent.save_checkpoint(tag="latest")
+    print("[RL Sidecar] Goodbye!")
+
+
+# register the save handler so we don't lose progress on Ctrl+C or normal exit
+atexit.register(_save_on_exit)
+
+
+def _signal_handler(signum, frame):
+    """handle SIGINT/SIGTERM gracefully — save and exit."""
+    print(f"\n[RL Sidecar] Caught signal {signum}, saving and exiting...")
+    agent.save_checkpoint(tag="latest")
+    sys.exit(0)
+
+
+# catch Ctrl+C and kill signals
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
 
 
 @app.route("/optimize_placement", methods=["POST"])
@@ -110,6 +145,23 @@ def calibrate_trust():
     return jsonify({"status": "ok", "divergence": round(divergence, 4)})
 
 
+@app.route("/save", methods=["POST"])
+def save_checkpoint():
+    """
+    manually trigger a checkpoint save. useful before planned maintenance
+    or if you want to snapshot the agent at a specific point.
+    """
+    filepath = agent.save_checkpoint(tag="manual")
+    stats = agent.get_stats()
+    return jsonify({
+        "status": "ok",
+        "filepath": filepath,
+        "model_version": stats["model_version"],
+        "total_steps": stats["total_steps"],
+        "replay_buffer_size": stats["replay_buffer_size"],
+    })
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """quick status check — the Go node polls this to verify the sidecar is alive."""
@@ -130,4 +182,6 @@ if __name__ == "__main__":
     print(f"[RL Sidecar] Starting on port {port}")
     print(f"[RL Sidecar] Features per candidate: {agent.max_candidates * 11}")
     print(f"[RL Sidecar] Warmup steps: {agent.total_steps}/{500}")
+    print(f"[RL Sidecar] Autosave every {config.AUTOSAVE_INTERVAL} training steps")
     app.run(host="127.0.0.1", port=port, debug=False)
+

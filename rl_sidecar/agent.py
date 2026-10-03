@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import uuid
+import os
+import pickle
+import glob
 from collections import defaultdict
 
 import config
@@ -346,6 +349,10 @@ class DDPGAgent:
 
         self.model_version += 1
 
+        # auto-save periodically so we don't lose training progress on crash
+        if self.model_version % config.AUTOSAVE_INTERVAL == 0:
+            self.save_checkpoint()
+
     def get_stats(self):
         """quick snapshot for the /health endpoint."""
         return {
@@ -356,3 +363,164 @@ class DDPGAgent:
             "tracked_peers_trust": len(self.peer_trust),
             "warmup_remaining": max(0, config.WARMUP_STEPS - self.total_steps),
         }
+
+    def _checkpoint_dir(self):
+        """resolves the checkpoint directory relative to where the sidecar code lives."""
+        base = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base, config.CHECKPOINT_DIR)
+
+    def save_checkpoint(self, tag=None):
+        """
+        dumps EVERYTHING needed to fully resume training:
+        - all 4 neural network weights (actor, critic, actor_target, critic_target)
+        - both Adam optimizer states (momentum buffers, etc.)
+        - the entire replay buffer (so we don't lose past experiences)
+        - placement history + trust scores (for retroactive eviction to still work)
+        - step counters and model version
+
+        without this, restarting the sidecar would be like wiping the agent's memory.
+        """
+        ckpt_dir = self._checkpoint_dir()
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        if tag is None:
+            tag = f"v{self.model_version}"
+
+        filepath = os.path.join(ckpt_dir, f"ddpg_{tag}.pt")
+
+        checkpoint = {
+            # neural network weights
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "actor_target": self.actor_target.state_dict(),
+            "critic_target": self.critic_target.state_dict(),
+
+            # optimizer states — crucial for Adam's momentum/variance estimates.
+            # without these, learning rate effectively resets and training stutters.
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+
+            # replay buffer — this is the agent's memory of past placements.
+            # losing it means the agent has to re-explore from scratch.
+            "replay_buffer": list(self.replay_buffer.buffer),
+
+            # placement history — needed for retroactive eviction penalties.
+            # if we lose this, the inverted HER mechanism can't walk back
+            # through recent placements when a node dies.
+            "placement_history": self.placement_history,
+            "placement_order": self.placement_order,
+
+            # trust calibration — per-peer divergence scores from heartbeat RTT.
+            # losing this means the agent temporarily forgets which nodes are lying.
+            "peer_trust": dict(self.peer_trust),
+
+            # counters
+            "total_steps": self.total_steps,
+            "model_version": self.model_version,
+
+            # OU noise state — so exploration continues from where it left off
+            # instead of resetting to zero (which would cause a sudden exploration spike)
+            "noise_state": self.noise.state.copy(),
+        }
+
+        # save atomically: write to tmp first, then rename.
+        # protects against half-written checkpoints if the process gets killed mid-save.
+        tmp_path = filepath + ".tmp"
+        torch.save(checkpoint, tmp_path, pickle_protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_path, filepath)
+
+        # clean up old checkpoints — keep only the last N
+        self._cleanup_old_checkpoints()
+
+        print(f"[RL] Checkpoint saved: {filepath} "
+              f"(v{self.model_version}, {self.total_steps} steps, "
+              f"{len(self.replay_buffer)} buffer entries)")
+
+        return filepath
+
+    def _cleanup_old_checkpoints(self):
+        """only keep the last MAX_CHECKPOINTS files to avoid eating disk space."""
+        ckpt_dir = self._checkpoint_dir()
+        checkpoints = sorted(
+            glob.glob(os.path.join(ckpt_dir, "ddpg_v*.pt")),
+            key=os.path.getmtime,
+        )
+        # leave the 'latest' tagged file alone, only prune versioned ones
+        while len(checkpoints) > config.MAX_CHECKPOINTS:
+            old = checkpoints.pop(0)
+            os.remove(old)
+            print(f"[RL] Pruned old checkpoint: {old}")
+
+    def load_checkpoint(self, filepath=None):
+        """
+        restores the agent's full state from a checkpoint file.
+        if no filepath is given, finds the most recent checkpoint in the directory.
+
+        returns True if a checkpoint was loaded, False if nothing was found.
+        """
+        ckpt_dir = self._checkpoint_dir()
+
+        if filepath is None:
+            # find the most recent checkpoint by modification time
+            candidates = glob.glob(os.path.join(ckpt_dir, "ddpg_*.pt"))
+            if not candidates:
+                print("[RL] No checkpoint found, starting fresh.")
+                return False
+            filepath = max(candidates, key=os.path.getmtime)
+
+        if not os.path.exists(filepath):
+            print(f"[RL] Checkpoint not found: {filepath}")
+            return False
+
+        try:
+            checkpoint = torch.load(filepath, weights_only=False)
+        except Exception as e:
+            print(f"[RL] Failed to load checkpoint {filepath}: {e}")
+            return False
+
+        # restore network weights
+        self.actor.load_state_dict(checkpoint["actor"])
+        self.critic.load_state_dict(checkpoint["critic"])
+        self.actor_target.load_state_dict(checkpoint["actor_target"])
+        self.critic_target.load_state_dict(checkpoint["critic_target"])
+
+        # restore optimizer states
+        self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+        self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+
+        # restore replay buffer
+        from collections import deque
+        self.replay_buffer.buffer = deque(
+            checkpoint["replay_buffer"],
+            maxlen=config.REPLAY_BUFFER_SIZE
+        )
+
+        # restore placement history for retroactive eviction
+        self.placement_history = checkpoint.get("placement_history", {})
+        self.placement_order = checkpoint.get("placement_order", [])
+
+        # restore trust scores
+        trust_data = checkpoint.get("peer_trust", {})
+        self.peer_trust = defaultdict(float, trust_data)
+
+        # restore counters
+        self.total_steps = checkpoint.get("total_steps", 0)
+        self.model_version = checkpoint.get("model_version", 0)
+
+        # restore OU noise state so exploration doesn't jump
+        if "noise_state" in checkpoint:
+            self.noise.state = checkpoint["noise_state"]
+
+        print(f"[RL] Checkpoint loaded: {filepath}")
+        print(f"[RL]   Model version: {self.model_version}")
+        print(f"[RL]   Total steps: {self.total_steps}")
+        print(f"[RL]   Replay buffer: {len(self.replay_buffer)} entries")
+        print(f"[RL]   Tracked placements: {len(self.placement_history)}")
+        print(f"[RL]   Tracked peers (trust): {len(self.peer_trust)}")
+        warmup_left = max(0, config.WARMUP_STEPS - self.total_steps)
+        if warmup_left > 0:
+            print(f"[RL]   Still in warmup: {warmup_left} steps remaining")
+        else:
+            print(f"[RL]   Actor network is LIVE (warmup complete)")
+
+        return True

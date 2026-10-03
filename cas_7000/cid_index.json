@@ -1,0 +1,30 @@
+[
+  {
+    "cid": "36c6af7b3ece7a1c0a9f7b08c44a33827538986ed4778f9e6c9a4400b8be5934",
+    "original_name": "ggg.txt",
+    "size": 96,
+    "chunk_count": 1,
+    "stored_at": "2026-08-11T07:06:33+05:30"
+  },
+  {
+    "cid": "c68cf9d5ae7fcf9dd31f2f4a41ac915f6e54a4f10a18da3a46dc301940fd0b1e",
+    "original_name": "images.jpg",
+    "size": 68949,
+    "chunk_count": 1,
+    "stored_at": "2026-08-11T07:18:04+05:30"
+  },
+  {
+    "cid": "59fd2d22891e64cfa1c5388d279e39186660f23c35539060e86600052adabdf8",
+    "original_name": "ggg.txt",
+    "size": 96,
+    "chunk_count": 1,
+    "stored_at": "2026-08-11T08:05:26+05:30"
+  },
+  {
+    "cid": "221c2e6384d7c5abccec0e5e95f91bfc89ddbc0a03276b03df1adb636685d70c",
+    "original_name": "README.md",
+    "size": 6874,
+    "chunk_count": 1,
+    "stored_at": "2026-08-11T08:19:16+05:30"
+  }
+]

@@ -6,7 +6,45 @@ Hey! So this is the Python RL sidecar for GO-DFS. It runs alongside each Go node
 
 We had to build this because simple heuristics just don't cut it when you have a bunch of P2P nodes lying about their latency.
 
-## 🏗️ Environment
+## 🏗️ Architecture & Optimization Pipeline
+
+```mermaid
+flowchart TD
+    GoServer["Go FileServer (internal/server/placement.go)"] -->|POST /optimize_placement| Flask["Flask API Server (server.py :5100)"]
+    
+    subgraph DDPG [DDPG Actor-Critic Optimization Engine]
+        Flask --> Vec["11-D Feature Extraction (Latency, Cost, Tier, Uptime, RTT, Trust)"]
+        Vec --> Actor["Actor Network (2x128 ReLU + Tanh)"]
+        Actor --> Noise["Action Scores + Ornstein-Uhlenbeck Exploration Noise"]
+        Noise --> Selection["Select Top R Highest Scoring Nodes"]
+        
+        Critic["Critic Network Q(s, a)"] --> Target["Target Networks (Soft Update tau=0.005)"]
+        Buffer["Replay Buffer (100k Steps)"] --> Optimizer["Adam Optimizer (Actor: 1e-4, Critic: 1e-3)"]
+    end
+    
+    Selection --> Flask
+    Flask -->|JSON: Targets + PlacementID| GoServer
+```
+
+```mermaid
+flowchart TD
+    subgraph PhaseA [Phase A: Immediate Dense Reward]
+        A1["Computed at Placement Time"] --> A2["R_dense = -w_lat*Lat - w_cost*Cost + w_rel*Uptime - w_trust*TrustDiv"]
+    end
+
+    subgraph PhaseB [Phase B: Trust Calibration]
+        B1["POST /calibrate_trust (Heartbeat RTTs)"] --> B2["Evaluates claimed vs empirical RTT divergence"]
+    end
+
+    subgraph PhaseC [Phase C: Retroactive Eviction Penalty]
+        C1["POST /record_eviction (Node Died)"] --> C2["Walks backward through placement history"]
+        C2 --> C3["Applies massive penalty (-100) to past placements choosing dead peer"]
+    end
+```
+
+---
+
+## 🏗️ Environment & Feature Vector
 
 The agent takes in a bunch of candidate nodes (up to `K` candidates, default 20) and spits out the top `R` nodes. 
 Each candidate has a feature vector of 11 dimensions:

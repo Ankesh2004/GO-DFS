@@ -8,7 +8,14 @@ The CLI provides all the tools you need to spin up a node, interact with the mes
 
 ## 🛠️ Getting Started
 
-Before you can store or retrieve files, you need to have a node running. All client commands (`put`, `get`, `ls`, etc.) talk to the local node's control API.
+Before you can store or retrieve files, you need to have a node running. All client commands (`put`, `get`, `ls`, etc.) talk to the local node's control API over HTTP with automatic token authentication (`X-Local-Auth`).
+
+```mermaid
+flowchart LR
+    Client["Thin CLI (dfs put / get / ls)"] -->|Localhost HTTP + Token Auth| API["Control API (:9000)"]
+    API --> Daemon["Node Daemon (:7000)"]
+    Daemon <-->|P2P Mesh Encrypted Stream| Remote["Remote Nodes"]
+```
 
 ```bash
 # Start a local node on port 7000

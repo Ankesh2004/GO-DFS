@@ -29,8 +29,25 @@ I designed the dashboard to give you a god-eye view of your P2P network. Here ar
 ---
 
 ## 🏗️ Architecture & Routing
-
+ 
 The app is built on **Next.js 16 (App Router)** and **React 19**, styled with **Tailwind CSS v4** and **shadcn/ui**. I used a dark-themed glassmorphism aesthetic because, let's be honest, it looks way cooler.
+ 
+```mermaid
+flowchart LR
+    Browser["Next.js Web Client (localhost:3000)"]
+    
+    subgraph NextJSBackend [Next.js App Router API Routes (/app/api)]
+        Browser -->|Fetch Topology| P1["GET /api/nodes"]
+        Browser -->|Multipart Upload| P2["POST /api/upload"]
+        Browser -->|Cluster Telemetry| P3["GET /api/metrics"]
+    end
+    
+    subgraph GoDaemon [Go DFS Node Control API (:9000)]
+        P1 -->|X-Local-Auth| G1["/api/peers & /api/id"]
+        P2 -->|X-Local-Auth| G2["/api/put (Streaming Encrypt & Chunk)"]
+        P3 -->|X-Local-Auth| G3["/api/status & /api/metrics"]
+    end
+```
 
 ### Directory Structure & Routing
 

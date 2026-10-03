@@ -40,3 +40,11 @@ PLACEMENT_HISTORY_SIZE = 1000
 # ---- exploration noise ----
 NOISE_SIGMA = 0.2         # Ornstein-Uhlenbeck noise sigma
 NOISE_THETA = 0.15        # OU noise theta (mean reversion speed)
+
+# ---- checkpoint persistence ----
+# without this the agent forgets everything on restart — weeks of learning gone.
+# checkpoints include: all 4 network weights, both optimizer states, replay buffer,
+# placement history, peer trust scores, and step counters.
+CHECKPOINT_DIR = "checkpoints"       # relative to rl_sidecar/, gets created automatically
+AUTOSAVE_INTERVAL = 100              # save every N training steps (model_version % N == 0)
+MAX_CHECKPOINTS = 3                  # only keep the last N checkpoints to save disk space

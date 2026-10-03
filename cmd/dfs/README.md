@@ -6,31 +6,48 @@
 
 ## 🏗️ Architecture & Design
 
+```mermaid
+flowchart TD
+    CLI["CLI Command / REPL Shell (dfs put, get, ls, rm, metrics)"]
+    
+    subgraph Localhost Only [127.0.0.1 Daemon Boundary]
+        CLI -->|HTTP + X-Local-Auth Token| API["Control API Server (internal/server/api.go :9000)"]
+        API --> Server["FileServer (internal/server/server.go)"]
+        Server --> CAS["Storage & ChunkLedger"]
+        Server --> DHT["Kademlia DHT Engine"]
+        Server --> Metrics["PlacementMetrics Engine"]
+    end
+    
+    Server <-->|Encrypted P2P Wire Protocol| Mesh["Remote Peer Nodes in Mesh"]
 ```
-+-------------------------------------------------------------------------+
-|                              dfs CLI / REPL                             |
-|    (dfs put, dfs get, dfs ls, dfs rm, dfs id, dfs peers, dfs status)    |
-+-------------------------------------------------------------------------+
-                                    |
-                           HTTP Control API
-                        (Header: X-Local-Auth)
-                                    v
-+-------------------------------------------------------------------------+
-|                        dfs node start (Daemon)                          |
-|  +---------------------+  +---------------------+  +-----------------+  |
-|  |   Control API Server|  |   P2P Transport     |  |   Kademlia DHT  |  |
-|  |     (Port :9000)    |  |     (Port :7000)    |  |   (Peer/Key)    |  |
-|  +---------------------+  +---------------------+  +-----------------+  |
-|  +-------------------------------------------------------------------+  |
-|  |                    FileServer (CAS / Encrypted Storage)           |  |
-|  +-------------------------------------------------------------------+  |
-+-------------------------------------------------------------------------+
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as CLI Client (dfs put / get)
+    participant Disk as Local Directory
+    participant API as Local Control API (:9000)
+    participant Mesh as Remote P2P Mesh
+
+    Note over CLI: 1. Magic Token Discovery
+    CLI->>Disk: resolveAPIToken() (Scans cas_*/api_token)
+    Disk-->>CLI: Loads 32-byte Auth Token
+    
+    Note over CLI: 2. Authenticated Streaming Request
+    CLI->>API: HTTP POST /api/put (Header: X-Local-Auth)<br/>Streaming multipart body (io.Pipe)
+    API->>API: authMiddleware validates token
+    API->>Mesh: StoreDataChunked (ChaCha20 Encrypt -> 8MB Chunk -> Replicate)
+    Mesh-->>API: File stored across K peers
+    API-->>CLI: 200 OK -> {"cid": "4a8f9b...", "name": "data.pdf", "size": 1048576}
 ```
 
 ### Key Architectural Highlights
-* **Client-Daemon Split**: Running `dfs node start` initializes the P2P node daemon and an HTTP control API (default `:9000`). Subcommands (`put`, `get`, `ls`, `rm`, `id`, `peers`, `status`) execute as lightweight HTTP clients querying the control API.
+* **Client-Daemon Split**: Running `dfs node start` initializes the P2P node daemon and an HTTP control API (default `:9000`). Subcommands (`put`, `get`, `ls`, `rm`, `id`, `peers`, `status`, `metrics`) execute as lightweight HTTP clients querying the control API.
 * **Token Authentication (`X-Local-Auth`)**: Client commands automatically discover and load security tokens from local node directories (`cas_*/api_token`), securing control API endpoints.
-* **Zero-Copy Streaming I/O**: File uploads (`dfs put`) and downloads (`dfs get`) stream data through `io.Pipe` and temporary download files, avoiding high memory overhead on multi-gigabyte files.
+* **Dual HTTP Client Engine**:
+  * **`newCLIHTTPClient()`**: Imposes a strict **5-second timeout** for fast diagnostics (`id`, `peers`, `status`) to avoid hanging on an unresponsive daemon.
+  * **`newCLIStreamingClient()`**: Operates with **zero timeout (`Timeout: 0`)** for multi-gigabyte streaming uploads (`put`) and downloads (`get`).
+* **Zero-Copy Streaming I/O & Atomic Writes**: File downloads (`dfs get`) stream raw bytes directly to a temporary file (`.tmp`) before executing an atomic `os.Rename`, preventing partial file corruption.
 * **Dual Execution Modes**: Supports headless daemon mode for production/background operation and interactive REPL mode (`-i` / `dfs demo`) for testing and manual mesh interaction.
 
 ---
