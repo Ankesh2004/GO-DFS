@@ -22,6 +22,27 @@ Recently, I've poured a ton of work into stabilizing the network and adding some
 <!-- finally got the RL sidecar and the web UI talking perfectly. Took a few sleepless nights but it was worth it! -->
 
 ---
+## 7-Layered Architecture
+
+```text
++-----------------------------------------------------------------------+
+|  Layer 7: Control Plane & Client Interfaces (CLI, REST API, Web UI)   |
++-----------------------------------------------------------------------+
+|  Layer 6: Intelligent Placement & DRL Sidecar (Multi-Objective DDPG)   |
++-----------------------------------------------------------------------+
+|  Layer 5: Node Orchestration, File Protocol & Self-Healing Replication |
++-----------------------------------------------------------------------+
+|  Layer 4: Distributed Topology & Kademlia DHT Routing                 |
++-----------------------------------------------------------------------+
+|  Layer 3: Content-Addressed Storage (CAS) & Chunking Engine           |
++-----------------------------------------------------------------------+
+|  Layer 2: Cryptographic & Security Layer (AEAD & Streaming Ciphers)   |
++-----------------------------------------------------------------------+
+|  Layer 1: Wire Transport & Peer-to-Peer Networking                   |
++-----------------------------------------------------------------------+
+
+```
+---
 
 ## 🏗️ Architecture Overview
 
